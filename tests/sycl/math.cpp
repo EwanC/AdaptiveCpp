@@ -336,6 +336,14 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(math_genfloat_binary, T,
 
   s::queue queue;
 
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
+
   if constexpr(std::is_same_v<DT, double>) {
     if (!queue.get_device().has(sycl::aspect::fp64)) {
       BOOST_TEST_MESSAGE("Skipping test for double since device has no fp64 support");
@@ -415,6 +423,13 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(common_functions, T,
       BOOST_TEST_MESSAGE("Skipping test for double since device has no fp64 support");
       return;
     }
+  }
+
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
   }
 
   s::buffer<T> buf{{FUN_COUNT + 2}};
@@ -518,6 +533,15 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(builtin_int_basic, T, math_test_genints) {
   // build inputs
 
   s::queue queue;
+
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
+
   s::buffer<T> buf{{FUN_COUNT + 2}};
   {
     auto acc = buf.template get_access<s::access::mode::write>();
@@ -606,6 +630,14 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(geometric_cross, T, math_test_crossinputs) {
     }
   }
 
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
+
   s::buffer<T> buf{{FUN_COUNT + 2}};
   {
     auto acc = buf.template get_access<s::access::mode::write>();
@@ -678,6 +710,14 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(geometric, T, math_test_gengeo) {
     }
   }
 
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
+
   s::buffer<T> buf{{FUN_COUNT + 2}};
   {
     auto acc = buf.template get_access<s::access::mode::write>();
@@ -742,6 +782,14 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(fast_geometric, T, math_test_gengeofloats) {
     }
   }
 
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
+
   s::buffer<T> buf{{FUN_COUNT + 2}};
   {
     auto acc = buf.template get_access<s::access::mode::write>();
@@ -804,6 +852,14 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(math_genfloat_int, T,
     }
   }
 
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
+
   s::buffer<T> in{{1}};
   s::buffer<T> out{{FUN_COUNT}};
   {
@@ -860,6 +916,14 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(math_genfloat_genint, T,
       return;
     }
   }
+
+  // See issue 9 in doc/vulkan.md
+  if (queue.get_device().get_backend() == sycl::backend::vk &&
+    std::string::npos != queue.get_device().get_info<sycl::info::device::name>().find("RADV MI200")) {
+    BOOST_TEST_MESSAGE("Skipping due to RADV issue on MI200 GPUs");
+    return;
+  }
+
 
   s::buffer<T> float_in{{1}};
   s::buffer<IntType> int_in{{1}};
