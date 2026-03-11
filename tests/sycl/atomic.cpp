@@ -101,6 +101,16 @@ void atomic_device_reduction_test(AtomicOp op, Verifier v,
       return;
     }
   }
+
+  // See doc/vulkan.md issue #2
+  if (q.get_device().get_backend() == sycl::backend::vk) {
+    if constexpr (std::is_same_v<T, double> || std::is_same_v<T, float>) {
+      BOOST_TEST_MESSAGE(
+          "Skipping test since Vulkan has not floating point atomic support");
+      return;
+    }
+  }
+
   if constexpr(sizeof(T) == 8) {
     if (!q.get_device().has(sycl::aspect::atomic64)) {
       BOOST_TEST_MESSAGE("Skipping test for 64-bit atomics since device has no atomic64 support");
@@ -380,8 +390,8 @@ BOOST_AUTO_TEST_CASE(atomic_fence) {
   // This is mainly a compile-test. Testing atomic memory semantics is hard...
 
   sycl::queue q;
-  int* data = sycl::malloc_shared<int>(1, q);
-  *data = 0;
+  int* data = sycl::malloc_device<int>(1, q);
+  q.memset(data, 0, sizeof(int)).wait();
   size_t range = 1024;
 
   q.parallel_for(range, [=](auto idx){
@@ -392,7 +402,10 @@ BOOST_AUTO_TEST_CASE(atomic_fence) {
     sycl::atomic_fence(sycl::memory_order::relaxed, sycl::memory_scope::device);
   }).wait();
 
-  BOOST_CHECK(*data == range);
+  int result;
+  q.memcpy(&result, data, sizeof(int)).wait();
+
+  BOOST_CHECK(result == range);
 
   sycl::free(data, q);
 }
