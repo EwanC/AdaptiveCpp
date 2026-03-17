@@ -152,7 +152,6 @@ can detect and set.
 
 ## TODO
 
-* Complete lib kernel implementation
 * Test with real application
 * Try to make compiler passes less brittle
 * Improve device-info queries marked with TODO comments
@@ -174,6 +173,7 @@ as:
 | `extension_tests`         | Pass   |
 | `fill_tests`              | Pass   |
 | `group_functions_tests`   | [Issue 5](#issue-5) & [Issue 10](#issue-10) |
+| `group_known_identity`    | Pass   |
 | `half_tests`              | Pass   |
 | `id_range_tests`          | Pass   |
 | `info_queries`            | Pass   |
@@ -217,7 +217,7 @@ do a clspv compiler pass that gets rid of the volatile load and do a manual mem2
 
 ### Issue 5
 
-Workgroup functions not yet implemented in libkernel for clspv.
+Compiler issue with group broadcast implementation.
 
 ### Issue 6
 
