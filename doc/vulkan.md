@@ -166,7 +166,7 @@ as:
 
 | Suite                     | Status |
 | ------------------------- | ------ |
-| `accessor_tests`          | [Issue 1](#issue-1), [Issue 4](#issue-4) & [Issue 8](#issue-8)  |
+| `accessor_tests`          | [Issue 1](#issue-1), [Issue 4](#issue-4) |
 | `atomic_tests`            | `fetch_ops` [Issue 2](#issue-2)   |
 | `buffer_tests`            | Pass   |
 | `explicit_copy_tests`     | Pass   |
@@ -191,7 +191,7 @@ as:
 | `vec_tests`               | Pass   |
 | `queue_tests`             | Pass   |
 | `multi_ptr_test_suite`    | Pass   |
-| `smoke_task_queue`        | [Issue 7](#issue-7) & [Issue 8](#issue-8) |
+| `smoke_task_queue`        | [Issue 7](#issue-7) |
 
 ### Issue 1
 
@@ -246,13 +246,6 @@ Investigations so far:
  * Generating logical memory model spirv from than physical addressing SPIRV gives the correct
    result in clvk
 
-### Issue 8
-
-> AMD MI GPU Only
-
-Non-deterministic verification fail in `accessors_tests/local_accessors` and
-`smoke_task_queue_tests/queue_local` on MI100 and MI200, needs further investigation.
-
 ### Issue 9
 
 > AMD MI200 GPU only
@@ -268,6 +261,7 @@ Assorted MI200 test fails that needs further investigation:
 * `item_api_tests/*`
 * `extension_tests/buffer_page_size`
 * `explicit_copy/explicit_buffer_copy_host_ptr`
+* `group_functions_tests/group_x_of_local`
 
 ### Issue 10
 
