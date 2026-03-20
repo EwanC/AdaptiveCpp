@@ -15,6 +15,9 @@ ARG VULKAN_VERSION="1.4.341.1"
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# So we can use `source`
+SHELL ["/bin/bash", "-c"]
+
 RUN apt-get -u update \
     && apt-get -qq upgrade \
     # Setup Kitware repo for the latest cmake available:
