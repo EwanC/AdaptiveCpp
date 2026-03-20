@@ -84,6 +84,21 @@ RUN <<EOF
 EOF
 
 RUN <<EOF
+    # skip if VULKAN_VERSION empty
+    if [ -z "${VULKAN_VERSION}" ]; then exit 0; fi
+
+    # Setup SDK
+    wget -q https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
+    tar -xf vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
+    source ${VULKAN_VERSION}/setup-env.sh
+
+    # Install mesa vulkan driver
+    apt-get update
+    apt-get install -y mesa-vulkan-drivers
+    rm -rf /var/lib/apt/lists/*
+EOF
+
+RUN <<EOF
     wget -q https://apt.llvm.org/llvm.sh
     chmod +x llvm.sh
     ./llvm.sh ${LLVM_VERSION}

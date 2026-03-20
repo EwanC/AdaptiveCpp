@@ -17,6 +17,8 @@ physical device is required.
 * The [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home) versions 1.4 or later.
 * A `clspv` executable, tested with commit `75d2471da8d697ae5a04d06cf14a1667b74200e8`
   and later.
+* Linux is the only supported OS, with Ubuntu 22.04 and later the tested distributions.
+  Adding support for Windows, macOS, and Android is future work.
 
 The following physical device features are also required to be
 support for a Vulkan device to be available although future work would be
@@ -205,6 +207,10 @@ generic implementation is fallen back to.
 * Test with real application.
 * Benchmark performance of backend.
 * Get SYCL running on Android device.
+* Enable backed on Windows CI.
+* Enable backend on macOS running on top of moltenVK
+
+### MVP TODO
 
 * Try pcuda
 * Lazily error on use of kernels which aren't supported by physical device, rather
