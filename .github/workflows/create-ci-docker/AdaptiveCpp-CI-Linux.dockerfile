@@ -95,12 +95,6 @@ RUN <<EOF
     # Setup SDK
     wget -O /opt/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz -q https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
     tar -xf /opt/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz -C /opt
-    # Manual equivalent of setup-env.sh exports
-    ENV VULKAN_SDK="/opt/${VULKAN_VERSION}"
-    ENV PATH="$PATH:$VULKAN_SDK/bin"
-    ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$VULKAN_SDK/lib"
-    ENV VK_ADD_LAYER_PATH="$VULKAN_SDK/share/vulkan/explicit_layer.d"
-
     # Install mesa vulkan driver
     apt-get update
     apt-get install -y mesa-vulkan-drivers
@@ -118,8 +112,11 @@ RUN <<EOF
     ln -s /usr/bin/FileCheck-${LLVM_VERSION} /usr/bin/FileCheck
 EOF
 
-ENV PATH="$PATH:/usr/local/cuda/bin"
-ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda/lib64"
+# Manual equivalent of setup-env.sh exports
+ENV VULKAN_SDK="/opt/${VULKAN_VERSION}/x86_64"
+ENV VK_ADD_LAYER_PATH="$VULKAN_SDK/share/vulkan/explicit_layer.d"
+ENV PATH="$PATH:/usr/local/cuda/bin:$VULKAN_SDK/bin"
+ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda/lib64:$VULKAN_SDK/lib"
 ENV CC=clang-${LLVM_VERSION}
 ENV CXX=clang++-${LLVM_VERSION}
 
