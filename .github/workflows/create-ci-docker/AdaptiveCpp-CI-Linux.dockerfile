@@ -93,9 +93,13 @@ RUN <<EOF
     if [ -z "${VULKAN_VERSION}" ]; then exit 0; fi
 
     # Setup SDK
-    wget -q https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
-    tar -xf vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
-    source ${VULKAN_VERSION}/setup-env.sh
+    wget -O /opt/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz -q https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
+    tar -xf /opt/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz -C /opt
+    # Manual equivalent of setup-env.sh exports
+    ENV VULKAN_SDK="/opt/${VULKAN_VERSION}"
+    ENV PATH="$PATH:$VULKAN_SDK/bin"
+    ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$VULKAN_SDK/lib"
+    ENV VK_ADD_LAYER_PATH="$VULKAN_SDK/share/vulkan/explicit_layer.d"
 
     # Install mesa vulkan driver
     apt-get update

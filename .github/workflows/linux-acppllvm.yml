@@ -113,6 +113,7 @@ jobs:
       if: ${{ matrix.docker.backend == 'vulkan' }}
       run: |
         echo "PATH=$GITHUB_WORKSPACE/clspv/build/install/bin:$PATH" >> $GITHUB_ENV
+        vulkaninfo --summary
     - name: build Adaptive Cpp
       run: |
         mkdir build && cd build
