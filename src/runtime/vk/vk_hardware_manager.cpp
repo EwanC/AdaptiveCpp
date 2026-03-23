@@ -20,8 +20,9 @@ namespace hipsycl {
 namespace rt {
 
 vk_hardware_context::vk_hardware_context(
-    const vk::raii::PhysicalDevice &phys_device, int dev_id)
-    : _physical_device(phys_device), _dev_id(dev_id) {
+    const vk::raii::PhysicalDevice &phys_device, int dev_id, uint16_t features)
+    : _physical_device(phys_device), _dev_id(dev_id),
+      _physical_dev_features(features) {
   _properties = phys_device.getProperties();
 
   std::vector<vk::QueueFamilyProperties> queue_family_props =
@@ -49,24 +50,36 @@ vk_hardware_context::vk_hardware_context(
       {}, _queue_index, 1, &queue_priority};
 
   vk::PhysicalDeviceVulkan12Features phys_dev_12_features{};
-  phys_dev_12_features.bufferDeviceAddress = true;
-  phys_dev_12_features.timelineSemaphore = true;
-  phys_dev_12_features.shaderInt8 = true;
-  phys_dev_12_features.shaderFloat16 = true;
-  phys_dev_12_features.storagePushConstant8 = true;
+  phys_dev_12_features.bufferDeviceAddress = VK_TRUE;
+  phys_dev_12_features.timelineSemaphore = VK_TRUE;
+  phys_dev_12_features.shaderSubgroupExtendedTypes = VK_TRUE;
+
+  phys_dev_12_features.shaderInt8 =
+      (_physical_dev_features & vk_device_features::shaderInt8) ? VK_TRUE : VK_FALSE;
+  phys_dev_12_features.shaderFloat16 =
+      (_physical_dev_features & vk_device_features::shaderFloat16)? VK_TRUE : VK_FALSE;
+  phys_dev_12_features.storagePushConstant8 =
+      (_physical_dev_features & vk_device_features::storagePushConstant8)? VK_TRUE : VK_FALSE;
 
   vk::PhysicalDeviceVulkan11Features phys_dev_11_features{};
-  phys_dev_11_features.variablePointers = true;
-  phys_dev_11_features.variablePointersStorageBuffer = true;
-  phys_dev_11_features.storagePushConstant16 = true;
+  phys_dev_11_features.variablePointers =
+      (_physical_dev_features & vk_device_features::variablePointers)? VK_TRUE : VK_FALSE;
+  phys_dev_11_features.variablePointersStorageBuffer =
+      (_physical_dev_features &
+       vk_device_features::variablePointersStorageBuffer)? VK_TRUE : VK_FALSE;
+  phys_dev_11_features.storagePushConstant16 =
+      (_physical_dev_features & vk_device_features::storagePushConstant16)? VK_TRUE : VK_FALSE;
 
   vk::PhysicalDeviceFeatures phys_dev_features{};
-  phys_dev_features.shaderInt16 = true;
-  phys_dev_features.shaderInt64 = true;
+  phys_dev_features.shaderInt16 =
+      (_physical_dev_features & vk_device_features::shaderInt16)? VK_TRUE : VK_FALSE;
+  phys_dev_features.shaderInt64 =
+      (_physical_dev_features & vk_device_features::shaderInt64)? VK_TRUE : VK_FALSE;
 
   vk::StructureChain<vk::DeviceCreateInfo, vk::PhysicalDeviceFeatures2,
                      vk::PhysicalDeviceVulkan12Features,
-                     vk::PhysicalDeviceVulkan11Features>
+                     vk::PhysicalDeviceVulkan11Features
+                     >
       dev_create_info_chain({{}, queue_create_info}, phys_dev_features,
                             phys_dev_12_features, phys_dev_11_features);
   auto device_create_info = dev_create_info_chain.get<vk::DeviceCreateInfo>();
@@ -100,6 +113,17 @@ vk_hardware_context::vk_hardware_context(
 
   vkGetPhysicalDeviceProperties2(*phys_device, &properties);
   _subgroup_size = sg_props.subgroupSize;
+
+  if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) {
+    _physical_dev_features |= vk_device_features::groupNonUniform;
+  }
+  if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT) {
+    _physical_dev_features |= vk_device_features::groupNonUniformVote;
+  }
+  if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) {
+    _physical_dev_features |= vk_device_features::groupNonUniformShuffle;
+  }
+
   _max_num_subgroups = sg_control_props.maxComputeWorkgroupSubgroups;
   _max_alloc_size = maint3_props.maxMemoryAllocationSize;
 
@@ -463,54 +487,12 @@ vk_hardware_manager::vk_hardware_manager()
     auto supported_features =
         phys_dev.getFeatures2<vk::PhysicalDeviceFeatures2,
                               vk::PhysicalDeviceVulkan11Features,
-                              vk::PhysicalDeviceVulkan12Features>();
-
-    vk::PhysicalDeviceFeatures const &features =
-        supported_features.get<vk::PhysicalDeviceFeatures2>().features;
-    if (!features.shaderInt16) {
-      HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
-                         << device_index
-                         << "doesn't support int16, skipping.\n";
-      device_index++;
-      continue;
-    }
-
-    if (!features.shaderInt64) {
-      HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
-                         << device_index
-                         << "doesn't support int64, skipping.\n";
-      device_index++;
-      continue;
-    }
-
-    auto const &features_11 =
-        supported_features.get<vk::PhysicalDeviceVulkan11Features>();
-    if (!features_11.variablePointers) {
-      HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
-                         << device_index
-                         << "doesn't support variable pointers, skipping.\n";
-      device_index++;
-      continue;
-    }
-
-    if (!features_11.variablePointersStorageBuffer) {
-      HIPSYCL_DEBUG_INFO
-          << "vk_hardware_manager: physical device " << device_index
-          << "doesn't support variable pointer storage buffers, skipping.\n";
-      device_index++;
-      continue;
-    }
-
-    if (!features_11.storagePushConstant16) {
-      HIPSYCL_DEBUG_INFO
-          << "vk_hardware_manager: physical device " << device_index
-          << "doesn't support 16-bit push constants, skipping.\n";
-      device_index++;
-      continue;
-    }
-
+                              vk::PhysicalDeviceVulkan12Features,
+                              VkPhysicalDeviceShaderLongVectorFeaturesEXT
+                              >();
     auto const &features_12 =
         supported_features.get<vk::PhysicalDeviceVulkan12Features>();
+    // Essential for supporting USM, don't create a backend device without it
     if (!features_12.bufferDeviceAddress) {
       HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
                          << device_index
@@ -518,6 +500,7 @@ vk_hardware_manager::vk_hardware_manager()
       device_index++;
       continue;
     }
+    // Essential for synchronization, don't create a backend device without it.
     if (!features_12.timelineSemaphore) {
       HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
                          << device_index
@@ -525,32 +508,56 @@ vk_hardware_manager::vk_hardware_manager()
       device_index++;
       continue;
     }
-    if (!features_12.shaderInt8) {
+    if (!features_12.shaderSubgroupExtendedTypes) {
       HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
                          << device_index
-                         << "doesn't support int8 shader types, skipping.\n";
+                         << "doesn't support subgroup extended types, skipping.\n";
       device_index++;
       continue;
+
     }
-    if (!features_12.shaderFloat16) {
-      HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
-                         << device_index
-                         << "doesn't support 16-bit floats, skipping.\n";
-      device_index++;
-      continue;
+
+    // Other physical features we can error on lazily if they are used in
+    // kernels which have the SPIR-V capabilities we don't support. So still
+    // create a device but record the relevant features.
+    uint16_t backend_features{};
+    if (features_12.shaderFloat16) {
+      backend_features |= vk_device_features::shaderFloat16;
     }
-    if (!features_12.storagePushConstant8) {
-      HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
-                         << device_index
-                         << "doesn't support 8-bit push constants, skipping.\n";
-      device_index++;
-      continue;
+    if (features_12.storagePushConstant8) {
+      backend_features |= vk_device_features::storagePushConstant8;
+    }
+    if (features_12.shaderInt8) {
+      backend_features |= vk_device_features::shaderInt8;
+    }
+
+    vk::PhysicalDeviceFeatures const &features =
+        supported_features.get<vk::PhysicalDeviceFeatures2>().features;
+    if (features.shaderInt16) {
+      backend_features |= vk_device_features::shaderInt16;
+    }
+    if (features.shaderInt64) {
+      backend_features |= vk_device_features::shaderInt64;
+    }
+
+    auto const &features_11 =
+        supported_features.get<vk::PhysicalDeviceVulkan11Features>();
+    if (features_11.variablePointers) {
+      backend_features |= vk_device_features::variablePointers;
+    }
+
+    if (features_11.variablePointersStorageBuffer) {
+      backend_features |= vk_device_features::variablePointersStorageBuffer;
+    }
+
+    if (features_11.storagePushConstant16) {
+      backend_features |= vk_device_features::storagePushConstant16;
     }
 
     auto device_name = phys_dev.getProperties().deviceName;
     if (device_matches(visibility_mask, backend_id::vk, device_index,
                        device_index, 0, device_name, {})) {
-      _devices.emplace_back(phys_dev, device_index);
+      _devices.emplace_back(phys_dev, device_index, backend_features);
     }
     device_index++;
   }
