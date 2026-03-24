@@ -55,31 +55,42 @@ vk_hardware_context::vk_hardware_context(
   phys_dev_12_features.shaderSubgroupExtendedTypes = VK_TRUE;
 
   phys_dev_12_features.shaderInt8 =
-      (_physical_dev_features & vk_device_features::shaderInt8) ? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::shaderInt8) ? VK_TRUE
+                                                                : VK_FALSE;
   phys_dev_12_features.shaderFloat16 =
-      (_physical_dev_features & vk_device_features::shaderFloat16)? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::shaderFloat16) ? VK_TRUE
+                                                                   : VK_FALSE;
   phys_dev_12_features.storagePushConstant8 =
-      (_physical_dev_features & vk_device_features::storagePushConstant8)? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::storagePushConstant8)
+          ? VK_TRUE
+          : VK_FALSE;
 
   vk::PhysicalDeviceVulkan11Features phys_dev_11_features{};
   phys_dev_11_features.variablePointers =
-      (_physical_dev_features & vk_device_features::variablePointers)? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::variablePointers)
+          ? VK_TRUE
+          : VK_FALSE;
   phys_dev_11_features.variablePointersStorageBuffer =
       (_physical_dev_features &
-       vk_device_features::variablePointersStorageBuffer)? VK_TRUE : VK_FALSE;
+       vk_device_features::variablePointersStorageBuffer)
+          ? VK_TRUE
+          : VK_FALSE;
   phys_dev_11_features.storagePushConstant16 =
-      (_physical_dev_features & vk_device_features::storagePushConstant16)? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::storagePushConstant16)
+          ? VK_TRUE
+          : VK_FALSE;
 
   vk::PhysicalDeviceFeatures phys_dev_features{};
   phys_dev_features.shaderInt16 =
-      (_physical_dev_features & vk_device_features::shaderInt16)? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::shaderInt16) ? VK_TRUE
+                                                                 : VK_FALSE;
   phys_dev_features.shaderInt64 =
-      (_physical_dev_features & vk_device_features::shaderInt64)? VK_TRUE : VK_FALSE;
+      (_physical_dev_features & vk_device_features::shaderInt64) ? VK_TRUE
+                                                                 : VK_FALSE;
 
   vk::StructureChain<vk::DeviceCreateInfo, vk::PhysicalDeviceFeatures2,
                      vk::PhysicalDeviceVulkan12Features,
-                     vk::PhysicalDeviceVulkan11Features
-                     >
+                     vk::PhysicalDeviceVulkan11Features>
       dev_create_info_chain({{}, queue_create_info}, phys_dev_features,
                             phys_dev_12_features, phys_dev_11_features);
   auto device_create_info = dev_create_info_chain.get<vk::DeviceCreateInfo>();
@@ -363,11 +374,23 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
     vk::DebugUtilsMessageTypeFlagsEXT type,
     const vk::DebugUtilsMessengerCallbackDataEXT *pCallbackData, void *) {
+  std::string callback_msg(pCallbackData->pMessage);
+  std::string kernel_name_str(
+      "vkCreateComputePipelines(): pCreateInfos[0].stage.pName exceeds max "
+      "length 256");
+  if (callback_msg.find(kernel_name_str) != std::string::npos) {
+    // Swallow validation error about max length of kernel name exceeding 256
+    // chars. It's only the restriction about the string being null terminated
+    // in that appears in the Vulkan spec, not the arbitrary 256 limit that the
+    // validation layer has chosen
+    return vk::False;
+  }
+
   if (severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eError ||
       severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning) {
     std::stringstream error_output;
     error_output << "vk_hardware_context validation layer: type"
-                 << to_string(type) << " message: " << pCallbackData->pMessage;
+                 << to_string(type) << " message: " << callback_msg;
     print_error(__acpp_here(), error_info{error_output.str()});
   }
 
@@ -487,9 +510,7 @@ vk_hardware_manager::vk_hardware_manager()
     auto supported_features =
         phys_dev.getFeatures2<vk::PhysicalDeviceFeatures2,
                               vk::PhysicalDeviceVulkan11Features,
-                              vk::PhysicalDeviceVulkan12Features,
-                              VkPhysicalDeviceShaderLongVectorFeaturesEXT
-                              >();
+                              vk::PhysicalDeviceVulkan12Features>();
     auto const &features_12 =
         supported_features.get<vk::PhysicalDeviceVulkan12Features>();
     // Essential for supporting USM, don't create a backend device without it
@@ -509,12 +530,11 @@ vk_hardware_manager::vk_hardware_manager()
       continue;
     }
     if (!features_12.shaderSubgroupExtendedTypes) {
-      HIPSYCL_DEBUG_INFO << "vk_hardware_manager: physical device "
-                         << device_index
-                         << "doesn't support subgroup extended types, skipping.\n";
+      HIPSYCL_DEBUG_INFO
+          << "vk_hardware_manager: physical device " << device_index
+          << "doesn't support subgroup extended types, skipping.\n";
       device_index++;
       continue;
-
     }
 
     // Other physical features we can error on lazily if they are used in

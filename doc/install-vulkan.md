@@ -32,7 +32,9 @@ support for a Vulkan device being reported as a SYCL backend:
   runtime to get a device pointer to return to the user.
 * `timelineSemaphore` - Used to implement synchronization between command
   submissions.
-
+* `shaderSubgroupExtendedTypes` - Enables support for subgroup operations
+  in kernels using `i8`, `i16`, `i64`, and `f16` types. There is no
+  SPIR-V capability to check for this lazily.
 
 Additionally, these shader capabilities are lazily checked against
 device support when a SPIR-V kernel is loaded, and an error
