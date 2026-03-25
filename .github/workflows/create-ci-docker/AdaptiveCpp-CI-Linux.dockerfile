@@ -95,7 +95,7 @@ RUN <<EOF
     # Install mesa 25.x vulkan driver
     apt-add-repository 'ppa:kisak/turtle' -y
     apt-get update
-    apt-get install -y mesa libvulkan1 vulkan-tools
+    apt-get install -y mesa-vulkan-drivers
     rm -rf /var/lib/apt/lists/*
 EOF
 
