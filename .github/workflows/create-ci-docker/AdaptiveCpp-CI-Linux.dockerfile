@@ -93,7 +93,7 @@ RUN <<EOF
     wget -O /opt/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz -q https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz
     tar -xf /opt/vulkansdk-linux-x86_64-${VULKAN_VERSION}.tar.xz -C /opt
     # Install mesa 25.x vulkan driver
-    apt-add-repository 'ppa:kisak/kisak-turtle' -y
+    apt-add-repository 'ppa:kisak/turtle' -y
     apt-get update
     apt-get install -y mesa libvulkan1 vulkan-tools
     rm -rf /var/lib/apt/lists/*
