@@ -388,7 +388,7 @@ BOOST_AUTO_TEST_CASE(incremental_reduction) {
   q.parallel_for(size, sycl::reduction(result, sycl::plus<>()),
                  [=](auto idx, auto &redu) { redu += data[idx]; }).wait();
 
-  int expected_result = std::accumulate(data, data + size, 0);
+  int expected_result = std::accumulate(std::begin(host_data), std::end(host_data), 0);
   int host_result;
   q.memcpy(&host_result, result, sizeof(int)).wait();
   BOOST_CHECK(host_result == expected_result);
