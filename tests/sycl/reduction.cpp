@@ -420,7 +420,7 @@ const int size = 1024;
     host_data[i] = static_cast<int>(i);
   q.memcpy(data, host_data.data(), size * sizeof(int)).wait();
 
-  int expected_result = 2 * std::accumulate(data, data + size, 0);
+  int expected_result = 2 * std::accumulate(std::begin(host_data), std::end(host_data), 0);
 
   q.memset(result, 0, sizeof(int)).wait();
   q.parallel_for(size, sycl::reduction(result, sycl::plus<>()),
