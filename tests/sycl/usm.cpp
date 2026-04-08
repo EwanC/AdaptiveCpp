@@ -605,6 +605,11 @@ BOOST_AUTO_TEST_CASE(linked_list_single_alloc) {
     return;
   }
 
+  if (q.get_device().get_backend() == sycl::backend::vk) {
+    BOOST_TEST_MESSAGE("Vulkan doesn't support pointer to pointer args");
+    return;
+  }
+
   const int num_nodes = 3;
   linked_list::Node *nodes = sycl::malloc_device<linked_list::Node>(num_nodes, q);
   linked_list::Node nodeC{2, nullptr};
@@ -629,6 +634,11 @@ BOOST_AUTO_TEST_CASE(linked_list_separate_alloc) {
   sycl::queue q{sycl::property::queue::in_order{}};
   if (q.get_device().get_backend() == sycl::backend::metal) {
     BOOST_TEST_MESSAGE("Not yet supported on Metal backend");
+    return;
+  }
+
+  if (q.get_device().get_backend() == sycl::backend::vk) {
+    BOOST_TEST_MESSAGE("Vulkan doesn't support pointer to pointer args");
     return;
   }
 
