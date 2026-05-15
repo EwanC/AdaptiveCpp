@@ -17,7 +17,7 @@
 BOOST_FIXTURE_TEST_SUITE(group_functions_tests, reset_device_fixture)
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_mul, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -68,7 +68,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_mul, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -157,7 +157,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_ptr, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -258,7 +258,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_ptr, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(sub_group_exclusive_scan, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -344,7 +344,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(sub_group_exclusive_scan, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_mul, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -395,7 +395,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_mul, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -483,7 +483,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_ptr, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -585,7 +585,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_ptr, T, test_types) {
 
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(sub_group_inclusive_scan, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -830,7 +830,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_or, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_xor, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
@@ -1021,7 +1021,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_or, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_xor, T, test_types) {
-  if (sycl::queue{}.get_device().get_backend() == sycl::backend::vk) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk) {
     BOOST_TEST_MESSAGE("libkernel function not yet implemented");
     return;
   }
