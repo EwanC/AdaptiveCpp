@@ -320,6 +320,7 @@ if(WITH_SSCP_COMPILER)
       clspv/PtrToIntPass.cpp
       clspv/SROAParallelForPass.cpp
       clspv/RemoveUnusedIntrinsicsPass.cpp
+      clspv/MemsetLoweringPass.cpp
       TOOL clspv/LLVMToCLSPVTool.cpp)
 
     find_program(CLSPV_COMPILER NAMES clspv REQUIRED)
