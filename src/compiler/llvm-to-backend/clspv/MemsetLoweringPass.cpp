@@ -47,7 +47,61 @@ llvm::Value *buildSplatValue(llvm::IRBuilder<> &B, llvm::Value *ByteVal,
   return llvm::ConstantInt::get(Ctx, Pattern);
 }
 
-void lowerMemset(llvm::MemSetInst *MS) {
+llvm::Type *inferDataType(llvm::MemSetInst *MS) {
+  llvm::LLVMContext &Ctx = MS->getContext();
+  llvm::Value *Dst = MS->getDest();
+  llvm::Type *ElemTy = nullptr;
+  if (auto GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(Dst)) {
+    ElemTy = GEP->getResultElementType();
+  } else {
+    auto Align = MS->getDestAlign();
+    if (!Align) {
+      llvm_unreachable("Need alignment to work out type");
+    }
+    const uint64_t AlignVal = Align->value();
+
+    if (AlignVal % sizeof(uint32_t) == 0) {
+      ElemTy = llvm::Type::getInt32Ty(Ctx);
+    } else if (AlignVal % sizeof(uint16_t) == 0) {
+      ElemTy = llvm::Type::Type::getInt16Ty(Ctx);
+    } else {
+      ElemTy = llvm::Type::getInt8Ty(Ctx);
+    }
+  }
+  return ElemTy;
+}
+
+void lowerMemsetStaticLen(llvm::MemSetInst *MS) {
+  // Work out the data type to store based on dst pointer
+  llvm::Value *Dst = MS->getDest();
+  llvm::Type *ElemTy = inferDataType(MS);
+
+  auto M = MS->getModule();
+  const llvm::DataLayout &DL = MS->getModule()->getDataLayout();
+  uint64_t ElemSize = DL.getTypeStoreSize(ElemTy);
+
+  llvm::IRBuilder<> Builder(MS);
+  auto Val = MS->getValue();
+  llvm::Value *StoreVal = buildSplatValue(Builder, Val, ElemTy);
+
+  auto NumBytes =
+      llvm::cast<llvm::ConstantInt>(MS->getLength())->getZExtValue();
+  const auto NumStores = NumBytes / ElemSize;
+  assert((NumBytes == NumStores * ElemSize) &&
+         "Null memset can't be divided evenly across multiple stores.");
+
+  auto I32Ty = llvm::Type::getInt32Ty(M->getContext());
+  for (uint32_t i = 0; i < NumStores; i++) {
+    auto Index = llvm::ConstantInt::get(I32Ty, i);
+    llvm::Value *Ptr = Builder.CreateInBoundsGEP(ElemTy, Dst, Index);
+    Builder.CreateStore(StoreVal, Ptr);
+  }
+
+  // Remove original memset intrinsic
+  MS->eraseFromParent();
+}
+
+void lowerMemsetDynamicLen(llvm::MemSetInst *MS) {
   // Create a loop to perform GEP and Stores, since the length of the memset is
   // dynamic we don't know the number of loop iterations to manually unroll the
   // loop.
@@ -82,9 +136,7 @@ void lowerMemset(llvm::MemSetInst *MS) {
 
   // Work out the data type to store based on dst pointer
   llvm::Value *Dst = MS->getDest();
-  auto GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(
-      Dst); // TODO check null and non-Gep
-  auto ElemTy = GEP->getResultElementType();
+  llvm::Type *ElemTy = inferDataType(MS);
 
   // Iterations is the byte operand to memset divided by size of the type
   // Warning: This assumes no remainder.
@@ -148,7 +200,11 @@ MemsetLoweringPass::run(llvm::Function &F, llvm::FunctionAnalysisManager &) {
   }
 
   for (llvm::MemSetInst *MS : Memsets) {
-    lowerMemset(MS);
+    if (llvm::isa<llvm::ConstantInt>(MS->getLength())) {
+      lowerMemsetStaticLen(MS);
+    } else {
+      lowerMemsetDynamicLen(MS);
+    }
   }
 
   return llvm::PreservedAnalyses::none();
