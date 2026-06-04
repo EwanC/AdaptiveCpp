@@ -17,8 +17,9 @@
 BOOST_FIXTURE_TEST_SUITE(group_functions_tests, reset_device_fixture)
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_mul, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -68,8 +69,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_mul, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -167,7 +169,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_ptr, T, test_types) {
   }
 
   if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -267,8 +269,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_ptr, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(sub_group_exclusive_scan, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -353,8 +356,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(sub_group_exclusive_scan, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_mul, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -404,8 +408,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_mul, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -502,7 +507,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_ptr, T, test_types) {
   }
 
   if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -603,8 +608,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_ptr, T, test_types) {
 
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(sub_group_inclusive_scan, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -776,6 +782,12 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_max, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_and, T, test_types) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
+    return;
+  }
+
   if constexpr(std::is_integral_v<detail::elementType<T>>) {
     const size_t elements_per_thread = 1;
     const auto data_generator = [](std::vector<T> &v, size_t local_size, size_t global_size) {
@@ -812,6 +824,12 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_and, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_or, T, test_types) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
+    return;
+  }
+
   if constexpr(std::is_integral_v<detail::elementType<T>>) {
     const size_t elements_per_thread = 1;
     const auto data_generator = [](std::vector<T> &v, size_t local_size, size_t global_size) {
@@ -848,8 +866,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_or, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_inclusive_scan_bit_xor, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 
@@ -965,6 +984,12 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_max, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_and, T, test_types) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
+    return;
+  }
+
   if constexpr(std::is_integral_v<detail::elementType<T>>) {
     const size_t elements_per_thread = 1;
     const auto data_generator = [](std::vector<T> &v, size_t local_size, size_t global_size) {
@@ -1002,6 +1027,12 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_and, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_or, T, test_types) {
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
+    return;
+  }
+
   if constexpr(std::is_integral_v<detail::elementType<T>>) {
     const size_t elements_per_thread = 1;
     const auto data_generator = [](std::vector<T> &v, size_t local_size, size_t global_size) {
@@ -1039,8 +1070,9 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_or, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_exclusive_scan_bit_xor, T, test_types) {
-  if (sycl::device{}.get_backend() == sycl::backend::vk) {
-    BOOST_TEST_MESSAGE("libkernel function not yet implemented");
+  if (sycl::device{}.get_backend() == sycl::backend::vk &&
+      !std::is_scalar_v<T>) {
+    BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
     return;
   }
 

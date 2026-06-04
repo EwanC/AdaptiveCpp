@@ -108,12 +108,6 @@ If a prior Scalar Reduction Of Aggregates (SROA) pass hasn't broken down the acp
 `basic_parallel_for` struct then we manually do it so that clspv avoids choking on
 the alloca.
 
-### LLVM SROA
-
-A regular LLVM SROA pass, used to breakdown kernel arguments that are structs
-passed by value. By breaking them down into their component members, each member
-can be put into a Vulkan uniform buffer at a specific offset.
-
 ### PtrToIntPass
 
 Pass for fixing resulting SROA components from large structs so that we don't

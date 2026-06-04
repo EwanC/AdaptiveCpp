@@ -19,7 +19,7 @@ the generic SSCP compilation flow.
   `VK_KHR_buffer_device_address` respectively.
 * The [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home) versions 1.4 or later
   for Vulkan loader, layers, headers, and other tools.
-* A `clspv` executable from commit `ea7c3cd2b0e004f52c2135cc850e684a92ca4cb1`.
+* A `clspv` executable from commit `8286ad49be1fa8708f07aa6852e1b84ed4dd0861`.
 * Linux, macOS, and Windows operating systems are tested in CI. Ubuntu 22.04 and later are the
   tested distributions for Linux. MacOS 15.7.4 is tested CI with MoltenVK. Windows server 2022
   is used with llvmpipe in CI. However on Windows there are sporadic failures in the `group_functions` suite
@@ -93,7 +93,7 @@ which are not supported for use in kernels targeting Vulkan SPIR-V are:
   LLVM IR, for example an `i48` for `marray<short, 3>`. See the
   [chipStar HipPromoteInts](https://github.com/CHIP-SPV/chipStar/blob/main/llvm_passes/HipPromoteInts.cpp)
   as a possible way to resolve this.
-* `group_scan` variants - Not supported, will fail to compile or generate incorrect results.
+* group function variants - Unstable support, will fail to compile or generate incorrect results.
 
 ## Device Support
 
@@ -359,7 +359,6 @@ convention `_Z8spirv.op.<SPIRV OpCode>.<Mangled parameters>`.
 * Get SYCL running on Android device.
 * Add CI for KosmicKrisp mesa Vulkan on Metal implementation.
 * Add CI to self-hosted runners.
-* Fix LIT tests
 * Fix Adaptivity Level 0 SYCL tests.
 * Backend Interop
 
@@ -408,7 +407,14 @@ built with LLVM 18, but not when built with LLVM 20.
 
 ### Issue 5
 
-Compiler issue with group broadcast implementation.
+Compiler issues with `sycl::vec2<int>` implementation. This arose when the LLVM
+datalayout changes to include the substring `n8:16:32:64` which enabled a SROA optimization
+on the vector alloca which lead to incorrect results.
+
+Additionally, there are compiler issue with group broadcast implementation.
+
+Possible solution to try add support for work group collective functions to clspv and
+use those builtins rather than common libkernel implementation.
 
 ### Issue 7
 
