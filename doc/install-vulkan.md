@@ -12,6 +12,7 @@ the generic SSCP compilation flow.
 
 ## Requirements
 
+* AdaptiveCpp should be built against LLVM version 19 or higher.
 * For a Vulkan backend device to be reported through SYCL a Vulkan 1.2 or later
   physical device is required. Vulkan 1.2 is the minimum version as it is the
   release where timeline semaphore and buffer device address features are made core
@@ -87,12 +88,11 @@ The holes in support arise from deficiencies in the compilation of kernel code. 
 which are not supported for use in kernels targeting Vulkan SPIR-V are:
 
 * Floating point atomics - Not supported, will generate incorrect results rather than error.
-* `marray` - Will fail to compile or in a LLVM 18 build generate incorrect results. SPIR-V does
-  not support non-standard integer types without the `SPV_INTEL_arbitrary_precision_integers`
-  extension which clspv does not support. However, using `marray` can generate such types in
-  LLVM IR, for example an `i48` for `marray<short, 3>`. See the
+* `marray` - Will fail to compile. SPIR-V does not support non-standard integer types without
+  the `SPV_INTEL_arbitrary_precision_integers` extension which clspv does not support. However,
+  using `marray` can generate such types in LLVM IR, for example an `i48` for `marray<short, 3>`. See the
   [chipStar HipPromoteInts](https://github.com/CHIP-SPV/chipStar/blob/main/llvm_passes/HipPromoteInts.cpp)
-  as a possible way to resolve this.
+  LLVM pass as a possible way to resolve this.
 * group function variants - Unstable support, will fail to compile or generate incorrect results.
 
 ## Device Support
@@ -401,9 +401,7 @@ floating point atomics are used in kernel code.
 
 ### Issue 3
 
-clspv can't deal with `i48` LLVM IR types generated from `marray<short, 3>` testing. On llvmpipe
-from Mesa 25.0.7 (LLVM 15.0.7) there are also issues with other `marray` types which ACPP is
-built with LLVM 18, but not when built with LLVM 20.
+clspv can't deal with `i48` LLVM IR types generated from `marray<short, 3>` testing.
 
 ### Issue 5
 
