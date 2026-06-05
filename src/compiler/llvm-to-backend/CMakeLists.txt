@@ -317,6 +317,8 @@ if(WITH_SSCP_COMPILER)
       BACKEND clspv
       LIBRARY clspv/LLVMToCLSPV.cpp
       clspv/AddrSpaceCastRemovalPass.cpp
+      clspv/PtrToIntPass.cpp
+      clspv/SROAParallelForPass.cpp
       clspv/RemoveUnusedIntrinsicsPass.cpp
       clspv/MemsetLoweringPass.cpp
       clspv/ConstantAddrSpacePass.cpp
