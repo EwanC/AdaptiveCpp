@@ -148,6 +148,7 @@ BOOST_AUTO_TEST_CASE_TEMPLATE(group_reduce, T, test_types) {
 }
 
 BOOST_AUTO_TEST_CASE_TEMPLATE(group_reduce_ptr, T, test_types) {
+  SKIP_IF_MOLTENVK(sycl::device{})
   if (sycl::device{}.get_backend() == sycl::backend::vk &&
       !std::is_scalar_v<T>) {
     BOOST_TEST_MESSAGE("group functions not yet stable on VK backend");
