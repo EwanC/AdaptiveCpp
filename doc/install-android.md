@@ -175,7 +175,11 @@ $ cmake .. -GNinja \
   -DLLVM_DIR=$LLVM_NDK_INSTALL/lib/cmake/llvm \
   -DCLANG_EXECUTABLE_PATH=/usr/bin/clang-20 \
   -DACPP_LLVMLINK_PATH=/usr/bin/llvm-link-20 \
-  -DTARGET_TRIPLE=aarch64-unknown-linux-android34
+  -DTARGET_TRIPLE=aarch64-unknown-linux-android34 \
+  -DACPP_LLC_PATH=$TODO/llc \
+  -DACPP_LLD_PATH=$TODO/ld.lld \
+  -DACPP_OPT_PATH=$TODO/opt \
+  -DACPP_CLSPV_PATH=$TODO/clspv
 
 $ ninja install
 $ export ACPP_NDK_INSTALL=$PWD/install
@@ -316,10 +320,6 @@ $ adb shell
 (adb) $ cd /data/local/tmp/sycl
 (adb) $ export ACPP_APPDB_DIR=$PWD/.acpp_cache
 (adb) $ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD:$PWD/acpp_install/lib:$PWD/acpp_install/lib/hipSYCL:$PWD/acpp_install/lib/hipSYCL/llvm-to-backend
-(adb) $ export ACPP_LLC_PATH=$PWD/llc
-(adb) $ export ACPP_LLD_PATH=$PWD/ld.lld
-(adb) $ export ACPP_OPT_PATH=$PWD/opt
-(adb) $ export ACPP_CLSPV_PATH=$PWD/clspv
 ```
 
 Now everything is in place to execute the application. The previous step didn't recommend pushing the cross compiled `acpp-info` binary, but if you

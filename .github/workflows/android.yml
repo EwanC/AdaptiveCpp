@@ -50,8 +50,7 @@ jobs:
     - name: Install build tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y ninja-build cmake wget unzip \
-                                qemu-user qemu-user-static
+        sudo apt-get install -y ninja-build cmake wget unzip
 
     # Native clang/llvm/lld/libomp matching the cross LLVM major version. These
     # are used on the host both to generate the libkernel builtin bitcode
@@ -154,9 +153,6 @@ jobs:
         ninja -j2 install
         echo "ACPP_NDK_INSTALL=$PWD/install" >> $GITHUB_ENV
 
-    - name: Show cross install tree
-      run: ls -R AdaptiveCpp/build-ndk/install
-
     # ------------------------------------------------------------------
     # Native AdaptiveCpp build
     # ------------------------------------------------------------------
@@ -180,18 +176,17 @@ jobs:
 
     # ------------------------------------------------------------------
     # Compile the simple example from doc/install-android.md using the native
-    # acpp compiler, then run the AArch64 binary under qemu-aarch64 user-mode
-    # emulation with the Android Bionic sysroot.
+    # acpp compiler, there is no way to run the application without installing
+    # the android-sdk emulator (future work)
     # ------------------------------------------------------------------
-    - name: Smoke test example on qemu-aarch64
-      continue-on-error: true
+    - name: Cross compile application
       run: |
         set -euo pipefail
 
         SYSROOT=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot
         RESOURCE_DIR=$(echo $NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/*/)
 
-        # --- write the example from doc/install-android.md ---
+        # Write the example from doc/install-android.md
         cat > android_sycl_test.cpp <<'EOF'
         #include <iostream>
         #include <sycl/sycl.hpp>
@@ -227,8 +222,8 @@ jobs:
         }
         EOF
 
-        # --- cross compile the app using the NATIVE acpp compiler, but target
-        #     the Android AArch64 sysroot (from doc "Cross Compile Application") ---
+        # cross compile the app using the NATIVE acpp compiler,
+        # but target the Android AArch64 sysroot
         ${ACPP_NATIVE_INSTALL}/bin/acpp android_sycl_test.cpp -o android_sycl_test \
             --target=aarch64-linux-android34 \
             --sysroot=${SYSROOT} \
@@ -237,22 +232,4 @@ jobs:
             -resource-dir=${RESOURCE_DIR} \
             -L ${ACPP_NDK_INSTALL}/lib
 
-        file android_sycl_test
-
-        # --- runtime environment for qemu-aarch64 ---
-        # QEMU_LD_PREFIX resolves Bionic loader/libs from the NDK sysroot.
-        # LD_LIBRARY_PATH points at the cross acpp + cross LLVM libs.
-        # SSCP generic JIT tools must be the AArch64 cross-compiled ones so they
-        # run under the same emulation as the app.
-        export QEMU_LD_PREFIX=${SYSROOT}
-        RT_LD_LIBRARY_PATH=${ACPP_NDK_INSTALL}/lib:${ACPP_NDK_INSTALL}/lib/hipSYCL:${ACPP_NDK_INSTALL}/lib/hipSYCL/llvm-to-backend:${LLVM_NDK_INSTALL}/lib
-
-        qemu-aarch64 \
-          -L ${QEMU_LD_PREFIX} \
-          -E LD_LIBRARY_PATH=${RT_LD_LIBRARY_PATH} \
-          -E ACPP_APPDB_DIR=${GITHUB_WORKSPACE}/.acpp_cache \
-          -E ACPP_OPT_PATH=${LLVM_NDK_INSTALL}/bin/opt \
-          -E ACPP_LLC_PATH=${LLVM_NDK_INSTALL}/bin/llc \
-          -E ACPP_LLD_PATH=${LLVM_NDK_INSTALL}/bin/ld.lld \
-          -E ACPP_VISIBILITY_MASK=omp \
-          ./android_sycl_test
+        file android_sycl_test | grep "ARM aarch64"
