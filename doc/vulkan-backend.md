@@ -163,3 +163,100 @@ graph LR
     SE  --> VTS
     USM --> VMem
 ```
+
+---
+
+## 5. Host-pointer memcpy via CPU worker thread
+
+When the source **or** destination of a `memcpy` operation is a plain host
+pointer (i.e. not backed by a `VkBuffer` / USM allocation), Vulkan cannot
+DMA the data directly.  The runtime detects this case at scheduling time and
+routes the transfer through a dedicated **CPU `worker_thread`**
+(`generic/async_worker`) instead of issuing a Vulkan command.
+
+Each `inorder_queue` for the Vulkan backend owns one `worker_thread` — a
+`std::thread` that drains a `std::queue<std::function<void()>>` under a
+`std::mutex` / `std::condition_variable`.  A `signal_channel`
+(`std::promise` / `std::shared_future`) is used as the completion event so
+that the rest of the DAG scheduler can wait on it in the normal way.
+
+```mermaid
+sequenceDiagram
+    participant App   as SYCL application
+    participant Sched as Runtime scheduler\n(DAG / inorder_executor)
+    participant VkQ   as Vulkan queue\n(vk_queue)
+    participant WT    as worker_thread\n(CPU std::thread)
+    participant Mem   as Host memory
+
+    App->>Sched: queue.submit(memcpy src→dst)\nboth pointers are plain host ptrs
+
+    Sched->>VkQ: submit_memcpy(op, node)
+    Note over VkQ: Detects src & dst are host ptrs\n(not VkBuffer-backed)\nSkips vkCmdCopyBuffer path
+
+    VkQ->>VkQ: create signal_channel\n(std::promise + std::shared_future)
+    VkQ->>VkQ: create omp_node_event\nwrapping signal_channel
+
+    VkQ->>WT: enqueue λ:\n  memcpy(dst, src, bytes);\n  signal_channel->signal();
+
+    VkQ-->>Sched: return omp_node_event\nas dag_node_event
+
+    Note over WT: worker_thread wakes\n(condition_variable notified)
+    WT->>Mem: std::memcpy(dst, src, bytes)\n[contiguous] or row-by-row\n[strided / multi-dimensional]
+    WT->>WT: signal_channel->signal()\npromise.set_value(true)
+
+    Sched->>Sched: dag_node marked complete\nwhen future is ready
+    App->>Sched: sycl::event::wait() or\nqueue.wait()
+    Sched->>WT: worker_thread::wait()\nblocks until queue empty
+```
+
+---
+
+## 6. `sycl::malloc_device` via the Vulkan allocator
+
+`sycl::malloc_device` allocates memory that lives exclusively on the GPU
+(device-local VRAM).  The call travels through the SYCL interface, the
+runtime's `allocate_device` helper, and finally the Vulkan backend's
+`vk_allocator`.
+
+The allocator uses the **Vulkan Memory Allocator (VMA)** library to
+sub-allocate from a `VmaPool` backed by a `VkDeviceMemory` object with
+`VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT`.  The returned opaque pointer is
+registered with the runtime's `allocation_tracker` (an
+`allocation_map`) so that later calls such as `get_pointer_type()` or
+`free()` can look up its metadata.
+
+```mermaid
+sequenceDiagram
+    participant App   as SYCL application
+    participant USM   as sycl::malloc_device\n(usm.hpp)
+    participant RT    as rt::allocate_device\n(allocator.cpp)
+    participant Alloc as vk_allocator\n(backend_allocator)
+    participant VMA   as VMA / VkDeviceMemory
+    participant Trkr  as allocation_tracker\n(allocation_map)
+
+    App->>USM: sycl::malloc_device(bytes, dev, ctx)
+
+    USM->>USM: select_device_allocator(dev)\n→ retrieve vk_allocator\nfor this VkDevice
+
+    USM->>RT: rt::allocate_device(alloc, alignment, bytes)
+
+    RT->>Alloc: alloc->raw_allocate(alignment, bytes)
+
+    Alloc->>VMA: vmaCreateBuffer / vmaAllocateMemory\nflags: VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT\nusage: VK_BUFFER_USAGE_STORAGE_BUFFER_BIT\n       | TRANSFER_SRC | TRANSFER_DST
+    VMA-->>Alloc: VkBuffer + VmaAllocation\n(opaque device pointer)
+
+    Alloc-->>RT: void* device_ptr
+
+    RT->>Trkr: on_new_allocation(ptr, bytes,\n  {device, allocation_type::device})
+    Note over Trkr: Stores ptr→{VkBuffer,\nVmaAllocation, device_id}\nin allocation_map
+
+    RT-->>USM: void* device_ptr
+    USM-->>App: void* device_ptr\n(GPU-only, not host-accessible)
+
+    Note over App: Later: sycl::free(ptr, ctx)
+    App->>USM: sycl::free(ptr, ctx)
+    USM->>RT: rt::deallocate(alloc, ptr)
+    RT->>Alloc: alloc->raw_free(ptr)
+    Alloc->>VMA: vmaDestroyBuffer / vmaFreeMemory
+    RT->>Trkr: on_deallocation(ptr)
+```
