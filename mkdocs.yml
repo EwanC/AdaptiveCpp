@@ -25,6 +25,7 @@ nav:
       - 'Runtime Specification' : 'runtime-spec.md'
       - 'HCF' : 'hcf.md'
       - 'SSCP implementation' : 'generic-sscp.md'
+      - 'Vulkan backend object mapping' : 'vulkan-backend.md'
 
   - 'Extensions overview' : 'extensions.md'
   - 'Extensions in detail' :
