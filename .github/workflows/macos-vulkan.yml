@@ -22,7 +22,7 @@ jobs:
       run: |
         set +e
         brew update
-        brew install llvm@19 lld@19 libomp boost ninja molten-vk lit
+        brew install llvm@19 lld@19 libomp boost ninja molten-vk lit@20
         set -e
 
     - name: Vulkan SDK

@@ -22,7 +22,7 @@ jobs:
       run: |
         set +e
         brew update
-        brew install llvm@20 lld@20 libomp boost ninja lit
+        brew install llvm@20 lld@20 libomp boost ninja lit@20
         set -e
 
     - name: download metal-cpp
