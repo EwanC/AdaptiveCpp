@@ -198,10 +198,8 @@ void vk_kernel_pipeline::create_uniform_backing_buffers() {
   if (unsigned bytes = _kern_obj->get_uniform_arg_size(); bytes > 0) {
     vk_allocator *allocator =
         _kern_obj->get_exe_obj()->get_hw_ctx()->get_allocator();
-    auto [uniform_buffer_raii, uniform_mem_raii] = allocator->create_buffer(
-        bytes, vk::BufferUsageFlagBits::eUniformBuffer);
-    _uniform_buffer_raii = std::move(uniform_buffer_raii);
-    _uniform_mem_raii = std::move(uniform_mem_raii);
+    std::tie(_uniform_buffer_raii, _uniform_mem_raii) =
+        allocator->uniform_allocate(bytes);
   }
 }
 

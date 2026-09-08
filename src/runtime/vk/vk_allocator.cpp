@@ -23,59 +23,41 @@ vk_allocator::vk_allocator(vk_hardware_context *hw_ctx, rt::device_id dev)
   _mem_properties = _hw_ctx->get_physical_device().getMemoryProperties();
 }
 
-uint32_t vk_allocator::find_memory_type(vk::MemoryPropertyFlags properties,
-                                        uint32_t type_filter) const {
+std::pair<uint32_t, vk::MemoryPropertyFlags>
+vk_allocator::find_memory_type(vk::MemoryPropertyFlags properties,
+                               uint32_t type_filter) const {
   for (uint32_t i = 0; i < _mem_properties.memoryTypeCount; i++) {
     if ((type_filter & (1 << i)) &&
         (_mem_properties.memoryTypes[i].propertyFlags & properties) ==
             properties) {
-      return i;
+      return std::make_pair(i, _mem_properties.memoryTypes[i].propertyFlags);
     }
   }
 
-  print_error(__acpp_here(),
-              error_info{"failed to find suitable memory type!"});
-  return UINT32_MAX;
+  return std::make_pair(UINT32_MAX, vk::MemoryPropertyFlags{});
 }
 
 std::size_t vk_allocator::get_global_mem_size() const {
-  constexpr vk::MemoryPropertyFlags mem_prop_flags =
+  // Return the size of the heap device USM pointers will be allocated from
+  constexpr vk::MemoryPropertyFlags preferred_mem_prop_flags =
       vk::MemoryPropertyFlagBits::eHostVisible |
-      vk::MemoryPropertyFlagBits::eHostCoherent;
-  uint32_t type_index = find_memory_type(mem_prop_flags);
+      vk::MemoryPropertyFlagBits::eHostCoherent |
+      vk::MemoryPropertyFlagBits::eDeviceLocal;
+
+  auto [type_index, _] = find_memory_type(preferred_mem_prop_flags);
+  if (type_index != UINT32_MAX) {
+    uint32_t heap_index = _mem_properties.memoryTypes[type_index].heapIndex;
+    return _mem_properties.memoryHeaps[heap_index].size;
+  }
+
+  constexpr vk::MemoryPropertyFlags required_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eDeviceLocal;
+  std::tie(type_index, std::ignore) = find_memory_type(required_mem_prop_flags);
   uint32_t heap_index = _mem_properties.memoryTypes[type_index].heapIndex;
   return _mem_properties.memoryHeaps[heap_index].size;
 }
 
-std::pair<vk::raii::Buffer, vk::raii::DeviceMemory>
-vk_allocator::create_buffer(vk::DeviceSize size,
-                            vk::BufferUsageFlags usage_flags) {
-  constexpr vk::MemoryPropertyFlags mem_prop_flags =
-      vk::MemoryPropertyFlagBits::eHostVisible |
-      vk::MemoryPropertyFlagBits::eHostCoherent;
-
-  vk::BufferCreateInfo buffer_info{
-      {}, size, usage_flags, vk::SharingMode::eExclusive};
-  const auto &device = _hw_ctx->get_device();
-  vk::raii::Buffer buffer(device, buffer_info);
-
-  vk::MemoryRequirements mem_reqs = buffer.getMemoryRequirements();
-  vk::MemoryAllocateInfo alloc_info{
-      mem_reqs.size, find_memory_type(mem_prop_flags, mem_reqs.memoryTypeBits)};
-
-  // vkHpp doesn't seem to like this, so pointer chain manually
-  VkMemoryAllocateFlagsInfo flags_info{};
-  flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-  flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-  alloc_info.pNext = &flags_info;
-
-  vk::raii::DeviceMemory buffer_mem(device, alloc_info);
-  buffer.bindMemory(buffer_mem, 0);
-
-  return std::make_pair(std::move(buffer), std::move(buffer_mem));
-}
-
-vk_alloc_info *vk_allocator::find_alloc_info(vk::DeviceAddress ptr) {
+vk_alloc_info *vk_allocator::find_user_alloc(vk::DeviceAddress ptr) {
   std::lock_guard<std::mutex> lock{_mutex};
   // Try to find quickly from base used as key to map
   if (_allocs.count(ptr)) {
@@ -96,6 +78,100 @@ vk_alloc_info *vk_allocator::find_alloc_info(vk::DeviceAddress ptr) {
   return nullptr;
 }
 
+std::pair<vk::raii::Buffer, vk::raii::DeviceMemory>
+vk_allocator::uniform_allocate(size_t size_bytes) {
+  constexpr vk::BufferUsageFlags usage_flags =
+      vk::BufferUsageFlagBits::eUniformBuffer;
+
+  constexpr vk::MemoryPropertyFlags required_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eHostVisible |
+      vk::MemoryPropertyFlagBits::eHostCoherent;
+
+  constexpr vk::MemoryPropertyFlags preferred_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eHostVisible |
+      vk::MemoryPropertyFlagBits::eHostCoherent |
+      vk::MemoryPropertyFlagBits::eDeviceLocal;
+
+  const auto &device = _hw_ctx->get_device();
+  vk::BufferCreateInfo buffer_info{
+      {}, size_bytes, usage_flags, vk::SharingMode::eExclusive};
+  vk::raii::Buffer buffer(device, buffer_info);
+
+  // Try use preferred memory properties, and if not available fall back to
+  // required memory properties.
+  vk::MemoryRequirements mem_reqs = buffer.getMemoryRequirements();
+  auto [mem_type_index, _] =
+      find_memory_type(preferred_mem_prop_flags, mem_reqs.memoryTypeBits);
+  if (mem_type_index == UINT32_MAX) {
+    std::tie(mem_type_index, std::ignore) =
+        find_memory_type(required_mem_prop_flags, mem_reqs.memoryTypeBits);
+    if (mem_type_index == UINT32_MAX) {
+      throw sycl::exception{
+          sycl::make_error_code(sycl::errc::memory_allocation),
+          "Could not allocate memory"};
+    }
+  }
+
+  vk::MemoryAllocateInfo alloc_info{mem_reqs.size, mem_type_index};
+  vk::raii::DeviceMemory buffer_mem(device, alloc_info);
+  buffer.bindMemory(buffer_mem, 0);
+
+  HIPSYCL_DEBUG_INFO << "vk_allocator: uniform allocated " << size_bytes
+                     << " bytes at " << std::hex << *buffer << std::dec
+                     << std::endl;
+
+  return std::make_pair(std::move(buffer), std::move(buffer_mem));
+}
+
+vk_alloc_info *vk_allocator::staging_allocate(size_t size_bytes) {
+  constexpr vk::BufferUsageFlags usage_flags =
+      vk::BufferUsageFlagBits::eTransferSrc |
+      vk::BufferUsageFlagBits::eTransferDst;
+
+  // Prefer host cached if possible for fastest access from host, as
+  // we will not access the staging buffer on device
+  constexpr vk::MemoryPropertyFlags required_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eHostVisible |
+      vk::MemoryPropertyFlagBits::eHostCoherent;
+
+  constexpr vk::MemoryPropertyFlags preferred_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eHostVisible |
+      vk::MemoryPropertyFlagBits::eHostCoherent |
+      vk::MemoryPropertyFlagBits::eHostCached;
+
+  const auto &device = _hw_ctx->get_device();
+  vk::BufferCreateInfo buffer_info{
+      {}, size_bytes, usage_flags, vk::SharingMode::eExclusive};
+  vk::raii::Buffer buffer(device, buffer_info);
+
+  // Try use preferred memory properties, and if not available fall back to
+  // required memory properties.
+  vk::MemoryRequirements mem_reqs = buffer.getMemoryRequirements();
+  auto [mem_type_index, mem_flags] =
+      find_memory_type(preferred_mem_prop_flags, mem_reqs.memoryTypeBits);
+  if (mem_type_index == UINT32_MAX) {
+    std::tie(mem_type_index, mem_flags) =
+        find_memory_type(required_mem_prop_flags, mem_reqs.memoryTypeBits);
+    if (mem_type_index == UINT32_MAX) {
+      throw sycl::exception{
+          sycl::make_error_code(sycl::errc::memory_allocation),
+          "Could not allocate memory"};
+    }
+  }
+
+  vk::MemoryAllocateInfo alloc_info{mem_reqs.size, mem_type_index};
+  vk::raii::DeviceMemory buffer_mem(device, alloc_info);
+  buffer.bindMemory(buffer_mem, 0);
+
+  HIPSYCL_DEBUG_INFO << "vk_allocator: staging allocated " << size_bytes
+                     << " bytes at " << std::hex << *buffer << std::dec
+                     << std::endl;
+
+  return new vk_alloc_info{
+      vk_alloc_type::STAGING, 0,        size_bytes, std::move(buffer),
+      std::move(buffer_mem),  mem_flags};
+}
+
 void *vk_allocator::raw_allocate(size_t, size_t size_bytes,
                                  const allocation_hints &) {
   std::lock_guard<std::mutex> lock{_mutex};
@@ -104,16 +180,59 @@ void *vk_allocator::raw_allocate(size_t, size_t size_bytes,
       vk::BufferUsageFlagBits::eTransferSrc |
       vk::BufferUsageFlagBits::eTransferDst |
       vk::BufferUsageFlagBits::eShaderDeviceAddress;
-  auto [buffer, device_mem] = create_buffer(size_bytes, usage_flags);
+
+  // This function allocates a device USM pointer, so make an effort to
+  // use a device pointer. Ideally this will also be from host visible and
+  // coherent memory so we can map it.
+  constexpr vk::MemoryPropertyFlags required_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eDeviceLocal;
+
+  constexpr vk::MemoryPropertyFlags preferred_mem_prop_flags =
+      vk::MemoryPropertyFlagBits::eHostVisible |
+      vk::MemoryPropertyFlagBits::eHostCoherent |
+      vk::MemoryPropertyFlagBits::eDeviceLocal;
+
+  const auto &device = _hw_ctx->get_device();
+
+  vk::BufferCreateInfo buffer_info{
+      {}, size_bytes, usage_flags, vk::SharingMode::eExclusive};
+  vk::raii::Buffer buffer(device, buffer_info);
+
+  // Try use preferred memory properties, and if not available fall back to
+  // required memory properties.
+  vk::MemoryRequirements mem_reqs = buffer.getMemoryRequirements();
+  auto [mem_type_index, mem_flags] =
+      find_memory_type(preferred_mem_prop_flags, mem_reqs.memoryTypeBits);
+  if (mem_type_index == UINT32_MAX) {
+    std::tie(mem_type_index, mem_flags) =
+        find_memory_type(required_mem_prop_flags, mem_reqs.memoryTypeBits);
+    if (mem_type_index == UINT32_MAX) {
+      throw sycl::exception{
+          sycl::make_error_code(sycl::errc::memory_allocation),
+          "Could not allocate memory"};
+    }
+  }
+
+  // vkHpp doesn't seem to like this, so pointer chain manually
+  VkMemoryAllocateFlagsInfo flags_info{};
+  flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+  flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+  vk::MemoryAllocateInfo mem_alloc_info{mem_reqs.size, mem_type_index};
+  mem_alloc_info.pNext = &flags_info;
+
+  vk::raii::DeviceMemory buffer_mem(device, mem_alloc_info);
+  buffer.bindMemory(buffer_mem, 0);
 
   vk::BufferDeviceAddressInfo addr_info{buffer};
   vk::DeviceAddress ptr = _hw_ctx->get_device().getBufferAddress(addr_info);
 
-  vk_alloc_info alloc_info{ptr, size_bytes, std::move(buffer),
-                           std::move(device_mem)};
+  vk_alloc_info alloc_info{
+      vk_alloc_type::USER,   ptr,      size_bytes, std::move(buffer),
+      std::move(buffer_mem), mem_flags};
   _allocs.insert({ptr, std::move(alloc_info)});
 
-  HIPSYCL_DEBUG_INFO << "vk_allocator: allocated " << size_bytes
+  HIPSYCL_DEBUG_INFO << "vk_allocator: user allocated " << size_bytes
                      << " bytes at 0x" << std::hex << ptr << std::dec
                      << std::endl;
   return reinterpret_cast<void *>(ptr);
@@ -134,8 +253,9 @@ void vk_allocator::raw_free(void *mem) {
   auto dev_ptr = reinterpret_cast<vk::DeviceAddress>(mem);
   assert(_allocs.count(dev_ptr));
 
-  HIPSYCL_DEBUG_INFO << "vk_allocator: freed 0x" << std::hex << mem << std::dec
+  HIPSYCL_DEBUG_INFO << "vk_allocator: freed " << std::hex << mem << std::dec
                      << std::endl;
+
   _allocs.erase(dev_ptr);
 }
 
