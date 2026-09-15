@@ -54,7 +54,7 @@ backend_hardware_manager *vk_backend::get_hardware_manager() const {
   return &_hw_manager;
 }
 
-backend_executor *vk_backend::get_executor(device_id dev) const {
+backend_executor *vk_backend::get_executor(device_id) const {
   return _executor.get();
 }
 

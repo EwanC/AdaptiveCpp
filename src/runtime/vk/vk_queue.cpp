@@ -360,8 +360,7 @@ result vk_queue::submit_memcpy(memcpy_operation &op, const dag_node_ptr &node) {
 vk::CommandBuffer
 vk_queue::begin_command_buffer(vk::CommandBufferUsageFlagBits flags) {
   auto cmd_buf = get_command_buffer();
-  cmd_buf.begin(vk::CommandBufferBeginInfo(
-      vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+  cmd_buf.begin(vk::CommandBufferBeginInfo(flags));
 
   if (_profiling && _profiling->start_time) {
     // When profiling, start the command buffer with commands to reset and
@@ -773,7 +772,7 @@ result vk_queue::submit_sscp_kernel_from_code_object(
 
     // Construct SPIR-V translator to compile the specified kernels
     std::unique_ptr<compiler::LLVMToBackendTranslator> translator =
-        std::move(compiler::createLLVMToCLSPVTranslator(kernel_names));
+        compiler::createLLVMToCLSPVTranslator(kernel_names);
 
     auto raw_translator = translator.get();
     raw_translator->setBuildOption(
