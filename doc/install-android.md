@@ -173,7 +173,7 @@ right arguments to native LLVM tools that match the LLVM version being linked in
 builtins bitcode to be created. The other consideration is passing the right device path to where cross compiled LLVM tooling will be at
 runtime so that the SSCP JIT can function.
 
-In the command below `-DCLANG_EXECUTABLE_PATH` and `-DACPP_LLVM_LINK_PATH` must be native executables to satisfy the first
+In the command below `-DACPP_BITCODE_CLANG` and `-DACPP_BITCODE_LLVM_LINK` must be native executables to satisfy the first
 consideration, while `-DACPP_LLC_PATH`, `-DACPP_LLD_PATH`, `-DACPP_OPT_PATH`, and `-DACPP_CLSPV_PATH` (Vulkan only) must
 be paths to where the cross compiled tools will be pushed on device to satisfy the second consideration.
 
@@ -187,9 +187,8 @@ $ cmake .. -GNinja \
   -DANDROID_PLATFORM=android-34 \
   -DCMAKE_INSTALL_PREFIX=$PWD/install \
   -DLLVM_DIR=$LLVM_NDK_INSTALL/lib/cmake/llvm \
-  -DCLANG_EXECUTABLE_PATH=/usr/bin/clang-20 \
-  -DACPP_LLVMLINK_PATH=/usr/bin/llvm-link-20 \
-  -DTARGET_TRIPLE=aarch64-unknown-linux-android34 \
+  -DACPP_BITCODE_CLANG=/usr/bin/clang-20 \
+  -DACPP_BITCODE_LLVM_LINK=/usr/bin/llvm-link-20 \
   -DACPP_LLC_PATH=/data/local/tmp/sycl/llc \
   -DACPP_LLD_PATH=/data/local/tmp/sycl/ld.lld \
   -DACPP_OPT_PATH=/data/local/tmp/sycl/opt
