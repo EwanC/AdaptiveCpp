@@ -152,6 +152,73 @@ This pass rewrites such types using two different transformations:
   unsigned `icmp`, `zext`) or sign extended (`ashr`, `sdiv`, `srem`, signed
   `icmp`, `sext`) to the original width first.
 
+#### Traversal algorithm
+
+The rewrite is performed by a single **reverse post-order (RPO)** walk of the
+function rather than an iterative worklist fixpoint. The pass runs in six
+phases:
+
+| Phase | Step | Description |
+| ----- | ---- | ----------- |
+| 0 | `splitWideCopies()` | Rewrites values too wide to be promoted (>64 bits) |
+| 1 | Signature check | Aborts on illegal argument or return types |
+| 2 | `collectWork()` | RPO scan that checks legality and builds the work list |
+| 3 | `rewrite()` | Rewrites instructions in RPO order, then patches phi nodes |
+| 4 | Teardown | Erases the original instructions |
+| 5 | Alloca rewrite | Replaces allocas of illegal type with byte arrays |
+| 6 | `warnOnRemainingIllegalTypes()` | Diagnostic sweep over all blocks |
+
+**Why reverse post-order.** RPO visits a basic block only after all of its
+predecessors, except across loop back edges. Together with the natural
+top-to-bottom order within a block this means that when an instruction is
+rewritten in phase 3, all of its instruction operands have already been
+rewritten and have an entry in the old value &rarr; new value map. The only
+exception is a phi operand arriving on a back edge, so phi nodes are created
+with no incoming values and patched in a second pass once the walk completes.
+
+A single ordered pass suffices because the transformation is a pure value
+mapping: the mapped value has legal type and its low `N` bits are equal to the
+low `N` bits of the original `N`-bit value, with the bits above `N` left
+undefined. Nothing about the mapping of an instruction depends on its users, so
+no information flows backwards and no fixpoint iteration is needed. This keeps
+the pass linear in the number of instructions, and unlike a worklist approach
+that inserts temporary `trunc`/`zext` pairs at every not-yet-legalized
+boundary, it never materialises intermediate illegal width values that would
+need to be cleaned up afterwards.
+
+**All-or-nothing legality check.** Phase 2 only inspects the IR, it does not
+modify it. Every instruction defining or consuming an illegal integer type is
+checked against the supported opcodes and operand kinds, and the whole function
+is rejected if any check fails. Performing this up front guarantees that
+phase 3 either rewrites the function completely or does not start, so the pass
+never leaves the function in a half legalized state which would be harder to
+diagnose than the original IR. Rejected are:
+
+* opcodes outside the supported set, including volatile/atomic accesses and
+  calls taking or returning an illegal type,
+* illegal types that do not fit into a legal one, i.e. wider than 64 bits -
+  these are only handled by phase 0, and only for plain copies,
+* illegal typed operands that are neither instructions, constant integers nor
+  undef, since no promoted counterpart could be derived for them.
+
+Phase 0 runs before this check because it is self-contained and locally valid
+regardless of the rest of the function.
+
+**Teardown order.** Original instructions cannot be erased as they are
+rewritten: they may still be referenced by originals that have not been
+processed yet, and phi nodes in loops form reference cycles. Phase 4 therefore
+calls `dropAllReferences()` on all collected instructions first, breaking every
+cycle, and only then erases them. Both loops run in reverse work list order so
+that definitions are destroyed after their users. Instructions whose result
+type was already legal, e.g. an `icmp i48` producing an `i1`, are instead
+replaced via `replaceAllUsesWith()` during phase 3, because they can have users
+outside the work list.
+
+**Limitations.** RPO only visits blocks reachable from the entry block, so
+illegal types in unreachable code are not rewritten. Such code is normally
+removed by the preceding optimization pipeline; if it survives, phase 6 still
+reports it, as that sweep iterates over all basic blocks.
+
 Instructions that cannot be rewritten, e.g. calls taking a non-standard
 integer type, or volatile/atomic accesses, leave the function unmodified and
 emit a warning. Reporting this directly is more useful than the obscure error

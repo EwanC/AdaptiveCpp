@@ -34,9 +34,17 @@ namespace compiler {
 ///   care to mask or sign extend operands of width-sensitive operations such
 ///   as 'lshr', 'ashr', 'udiv', 'sdiv' or 'icmp'.
 ///
+/// The rewrite is driven by a single reverse post-order walk of the function
+/// rather than an iterative worklist: operands are therefore always legalized
+/// before their users, except across loop back edges, which are resolved by
+/// patching the newly created phi nodes after the main walk. See the comment
+/// at the top of LegalizeIntWidthsPass.cpp for a detailed description.
+///
 /// If the pass encounters an illegal integer width it cannot rewrite, the
 /// function is left unmodified and a warning is emitted, as a diagnostic is
-/// more useful than the opaque failure clspv would otherwise report.
+/// more useful than the opaque failure clspv would otherwise report. The
+/// decision is taken before any instruction is modified, so a function is
+/// either rewritten completely or not at all.
 class LegalizeIntWidthsPass
     : public llvm::PassInfoMixin<LegalizeIntWidthsPass> {
 public:

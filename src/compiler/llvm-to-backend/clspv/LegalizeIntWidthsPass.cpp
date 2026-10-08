@@ -33,6 +33,70 @@
 //
 // Anything that cannot be handled leaves the function untouched and emits a
 // warning, which is a better diagnostic than the opaque clspv failure.
+//
+// Traversal algorithm
+// -------------------
+// The rewrite is driven by a single reverse post-order (RPO) walk of the
+// function instead of an iterative worklist fixpoint. The pass runs in six
+// phases, see `IntWidthLegalizer::run()`:
+//
+//   0. `splitWideCopies()`   - handle values too wide to promote (>64 bits)
+//   1. signature check       - bail out on illegal argument/return types
+//   2. `collectWork()`       - RPO scan, legality check, build work list
+//   3. `rewrite()`           - rewrite in RPO order, patch phis afterwards
+//   4. erase originals       - two-step teardown to break phi cycles
+//   5. alloca rewrite        - illegal alloca types become byte arrays
+//   6. `warnOnRemainingIllegalTypes()` - diagnostic sweep
+//
+// Why reverse post-order
+// ~~~~~~~~~~~~~~~~~~~~~~
+// RPO visits a basic block only after all of its predecessors, except across
+// loop back edges. Combined with the natural top-to-bottom order inside a
+// basic block, this means that for every instruction `I` processed in phase 3,
+// every operand of `I` that is itself an instruction has *already* been
+// rewritten and therefore has an entry in the `Promoted` map. The only
+// exception is a phi operand arriving on a back edge, which is why phi nodes
+// get a placeholder and are patched in a second pass over `PhiMap`.
+//
+// A single ordered pass is possible because the rewrite is a pure value
+// mapping: `Promoted[V]` holds a value of legal type whose low `N` bits equal
+// the low `N` bits of the original `N`-bit value `V` (bits above `N` are
+// undefined). Nothing about the mapping of an instruction depends on its
+// users, so no information flows backwards and no fixpoint iteration is
+// needed. This keeps the pass O(instructions) and, unlike a worklist that
+// inserts temporary `trunc`/`zext` pairs at every not-yet-legalized boundary,
+// it never materialises intermediate illegal-width values that would have to
+// be cleaned up afterwards.
+//
+// All-or-nothing legality check
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Phase 2 only inspects the IR; it does not modify it. Every instruction that
+// defines or consumes an illegal integer type is checked against the set of
+// supported opcodes and operand kinds, and the whole function is rejected if
+// any of them fails. Doing this up front guarantees that phase 3 either
+// rewrites the function completely or does not start at all, so the pass never
+// leaves the function in a half-legalized state that is harder to diagnose
+// than the original IR. Phase 0 runs before this check because it is
+// self-contained and locally valid regardless of the rest of the function.
+//
+// Teardown order
+// ~~~~~~~~~~~~~~
+// Original instructions cannot simply be erased as they are rewritten: they
+// may still be referenced by other originals that have not been processed yet,
+// and phi nodes in loops form reference cycles. Phase 4 therefore first calls
+// `dropAllReferences()` on all collected instructions (breaking every cycle
+// and dropping all uses among them) and only then erases them. Both loops run
+// in reverse work-list order so that definitions are destroyed after their
+// users. Instructions whose result type was already legal - e.g. an `icmp i48`
+// producing `i1` - are RAUW'd onto their replacement during phase 3, since
+// those may have users outside the work list.
+//
+// Known limitations
+// ~~~~~~~~~~~~~~~~~
+// RPO only visits blocks reachable from the entry block, so illegal types in
+// unreachable code are not rewritten. Such code is normally removed by the
+// preceding optimization pipeline; if it survives, phase 6 reports it, as that
+// sweep iterates over all basic blocks.
 
 #include "hipSYCL/compiler/llvm-to-backend/clspv/LegalizeIntWidthsPass.hpp"
 #include "hipSYCL/common/debug.hpp"
@@ -269,6 +333,24 @@ bool IntWidthLegalizer::splitWideCopies() {
   return Changed;
 }
 
+// Phase 2: Scan the function in reverse post-order and record every
+// instruction that needs rewriting, without modifying the IR.
+//
+// Returns false if the function contains an illegal integer type the pass
+// cannot handle. In that case the caller abandons legalization of this
+// function entirely, see the "All-or-nothing legality check" note at the top
+// of this file. Rejected are:
+//
+//  * opcodes outside the supported set, including volatile/atomic accesses
+//    and calls taking or returning an illegal type,
+//  * illegal types that do not fit into a legal one (>64 bits); these are
+//    only handled by phase 0 for plain copies,
+//  * illegal-typed operands that are neither instructions, constant ints nor
+//    undef, as there would be no way to derive a promoted counterpart.
+//
+// Allocas are collected separately: they are rewritten in phase 5 whether or
+// not the alloca itself appears in the work list, and their illegal type never
+// propagates into a value, since it is only part of the allocated type.
 bool IntWidthLegalizer::collectWork() {
   llvm::ReversePostOrderTraversal<llvm::Function *> RPO{&F};
   for (llvm::BasicBlock *BB : RPO) {
@@ -309,6 +391,13 @@ bool IntWidthLegalizer::collectWork() {
   return true;
 }
 
+// Returns the legal-width counterpart of an illegal-width value.
+//
+// For instructions this is the entry recorded by phase 3; thanks to the RPO
+// order it is already present for every operand, with the exception of phi
+// back edges which are resolved after the main loop. Constants and undef are
+// materialised on demand. A null return means the value cannot be legalized
+// and aborts the rewrite.
 llvm::Value *IntWidthLegalizer::getPromoted(llvm::Value *V) {
   assert(isIllegalIntTy(V->getType()) && "Value is already of legal type");
 
@@ -547,7 +636,11 @@ void IntWidthLegalizer::completeCreatedPhis() {
   }
 }
 
+// Phase 3 and 4: rewrite all collected instructions in RPO order, patch the
+// phi nodes created along the way, then tear down the originals.
 bool IntWidthLegalizer::rewrite() {
+  // Phase 3. Operands are guaranteed to be legalized already (RPO), so a
+  // single ordered pass is sufficient; no fixpoint iteration is required.
   for (llvm::Instruction *I : Work) {
     llvm::Value *New = rewriteInstruction(I);
     if (!New) {
@@ -567,7 +660,10 @@ bool IntWidthLegalizer::rewrite() {
       I->replaceAllUsesWith(New);
   }
 
-  // Now that all values have a legalized counterpart, patch the phi nodes.
+  // Loop back edges are the only place where RPO does not guarantee that an
+  // operand has been rewritten before its user, so the new phi nodes were
+  // created with no incoming values. Now that every value has a legalized
+  // counterpart, fill them in.
   for (auto &Entry : PhiMap) {
     llvm::PHINode *Old = Entry.first;
     llvm::PHINode *New = Entry.second;
@@ -582,8 +678,10 @@ bool IntWidthLegalizer::rewrite() {
     }
   }
 
-  // Erase the original instructions. Their remaining uses are all among the
-  // instructions being erased.
+  // Phase 4. The originals may still reference each other, and phi nodes in
+  // loops form reference cycles, so drop all references first to break those
+  // cycles before erasing. Both loops run in reverse work-list order, i.e.
+  // users before definitions.
   for (llvm::Instruction *I : llvm::reverse(Work))
     I->dropAllReferences();
   for (llvm::Instruction *I : llvm::reverse(Work))
@@ -593,8 +691,15 @@ bool IntWidthLegalizer::rewrite() {
 }
 
 bool IntWidthLegalizer::run() {
+  // Phase 0. Values wider than 64 bits have no legal type to be promoted to,
+  // so they are only supported as plain memory copies, which this phase
+  // rewrites in place. It is independent of the legality check below.
   bool Changed = splitWideCopies();
 
+  // Phase 1. Illegal types in the signature would require rewriting the
+  // function itself along with all of its call sites, which is out of scope:
+  // by the time this pass runs the backend has aggressively inlined the
+  // module, so such signatures are not expected in practice.
   for (const llvm::Argument &A : F.args()) {
     if (isIllegalIntTy(A.getType()))
       return Changed;
@@ -602,8 +707,11 @@ bool IntWidthLegalizer::run() {
   if (isIllegalIntTy(F.getReturnType()))
     return Changed;
 
+  // Phase 2.
   if (!collectWork())
     return Changed;
+
+  // Phase 3 and 4.
 
   if (!Work.empty()) {
     if (!rewrite()) {
@@ -615,8 +723,10 @@ bool IntWidthLegalizer::run() {
     Changed = true;
   }
 
-  // Allocas of illegal types are replaced by equally sized byte arrays; all
-  // accesses to them have been split into legal accesses above.
+  // Phase 5. Allocas of illegal types are replaced by equally sized byte
+  // arrays; all accesses to them have been split into legal accesses above.
+  // Since pointers are opaque, users of the alloca do not need to be rewritten
+  // beyond that.
   for (llvm::AllocaInst *AI : IllegalAllocas) {
     const uint64_t SizeInBytes = DL.getTypeStoreSize(AI->getAllocatedType());
     llvm::IRBuilder<> B{AI};
@@ -633,8 +743,10 @@ bool IntWidthLegalizer::run() {
   return Changed;
 }
 
-/// Reports integer types of non-standard width that survived legalization, as
-/// those would result in an obscure clspv error message later on.
+/// Phase 6: Reports integer types of non-standard width that survived
+/// legalization, as those would result in an obscure clspv error message later
+/// on. Unlike the RPO walk of phase 2 this visits all basic blocks, so it also
+/// covers unreachable code the rewrite does not reach.
 void warnOnRemainingIllegalTypes(llvm::Function &F) {
   for (llvm::BasicBlock &BB : F) {
     for (llvm::Instruction &I : BB) {
