@@ -120,6 +120,64 @@ This pass re-folds such chains back into a single typed GEP:
 The fold is applied only when the byte offset is an exact multiple of
 `sizeof(T)`, which is always the case for the specific instcombine transform.
 
+### LegalizeIntWidthsPass
+
+Integer types of non-standard bit width can be present in the SSCP generated
+IR which clspv is unable to lower to SPIR-V, as Vulkan flavoured SPIR-V only supports
+8, 16, 32 and 64-bit integers. For example SROA and instcombine merge the
+three `i16` components of a `sycl::marray<short, 3>` into a single `i48`
+value, and on aarch64 hosts `i128` values are created for
+`sycl::vec<float, 3>`. These integer bitwidths aren't typically
+generated from OpenCL-C source, so clspv isn't expecting to consume them.
+
+This pass rewrites such types using two different transformations depending
+on if an instruction is a memory access or a computation:
+
+* Memory accesses are split into multiples accesses of legal width. A
+  `load i48` only reads 6 bytes, so widening it to a `load i64` would access
+  memory outside of the object. Instead, the access is split into a `load i32`
+  and a `load i16` which are recombined with shift/or:
+
+```llvm
+%lo   = load i32, ptr %p
+%hi   = load i16, ptr getelementptr(i16, ptr %p, i64 2)
+%wide = or i64 (zext i32 %lo to i64), shl (zext i16 %hi to i64), 32
+```
+
+  Values wider than 64 bits can only be handled when they are a plain
+  load/store copy, which is then split into chunk sized load/store pairs.
+  Allocas of illegal types are replaced by equally sized `i8` arrays.
+
+* Computations are promoted** to the next larger legal width, e.g. `i48`
+  becomes `i64`. Only the low bits of a promoted value carry meaning, so
+  operands of width-sensitive operations are masked (`lshr`, `udiv`, `urem`,
+  unsigned `icmp`, `zext`) or sign extended (`ashr`, `sdiv`, `srem`, signed
+  `icmp`, `sext`) to the original width first.
+
+Instructions that cannot be rewritten, e.g. calls taking a non-standard
+integer type, or volatile/atomic accesses, leave the function unmodified and
+emit a warning.
+
+The transform algorithm is performed by a single reverse post-order (RPO)
+walk of the function:
+
+| Phase | Step | Description |
+| ----- | ---- | ----------- |
+| 0 | `splitWideCopies()` | Rewrites values too wide to be promoted (>64 bits) |
+| 1 | Signature check | Aborts on illegal argument or return types |
+| 2 | `collectWork()` | RPO scan that checks legality and builds the work list |
+| 3 | `rewrite()` | Rewrites instructions in RPO order, then patches phi nodes |
+| 4 | Teardown | Erases the original instructions |
+| 5 | Alloca rewrite | Replaces allocas of illegal type with byte arrays |
+| 6 | `warnOnRemainingIllegalTypes()` | Diagnostic sweep over all blocks |
+
+RPO visits a basic block only after all of its predecessors,
+except across loop back edges. This means that when an instruction is
+rewritten in phase 3, all of its instruction operands have already been
+rewritten and have an entry in the value map. The only
+exception is a phi operand arriving on a back edge, so phi nodes are created
+with no incoming values and patched in a second pass once the walk completes.
+
 ### AddrSpaceCastRemovalPass
 
 Remove casting away the address space from arguments, as otherwise
