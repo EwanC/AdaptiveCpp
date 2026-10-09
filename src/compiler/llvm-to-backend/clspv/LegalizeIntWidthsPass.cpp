@@ -26,10 +26,12 @@
 //   reads 6 bytes, so widening it to a `load i64` would read beyond the
 //   object; it is instead replaced by a `load i32` and a `load i16` that are
 //   recombined via shift/or. The same applies in reverse for stores.
-// * Computations are *promoted* to the next larger legal width. Promoted
-//   values only carry meaningful information in their low `N` bits, so
+// * Computations up to 64 bits are *promoted* to the next larger legal width.
+//   Promoted values only carry meaningful information in their low `N` bits, so
 //   operands of width-sensitive operations are masked (unsigned) or sign
 //   extended (signed) before use.
+// * i128 values are mapped to low/high i64 limbs. Unsupported i128 uses are
+//   rejected before any rewriting, including the legacy wide-store splitter.
 //
 // Anything that cannot be handled leaves the function untouched and emits a
 // warning, which is a better diagnostic than the opaque clspv failure.
@@ -40,7 +42,7 @@
 // function instead of an iterative worklist fixpoint. The pass runs in six
 // phases, see `IntWidthLegalizer::run()`:
 //
-//   0. `splitWideStores()`   - handle values too wide to promote (>64 bits)
+//   0. `splitWideStores()`   - legacy >64-bit store trees (except i128)
 //   1. signature check       - bail out on illegal argument/return types
 //   2. `collectWork()`       - RPO scan, legality check, build work list
 //   3. `rewrite()`           - rewrite in RPO order, patch phis afterwards
@@ -76,7 +78,8 @@
 // any of them fails. Doing this up front guarantees that phase 3 either
 // rewrites the function completely or does not start at all, so the pass never
 // leaves the function in a half-legalized state that is harder to diagnose
-// than the original IR. Phase 0 runs before this check because it is
+// than the original IR. For functions without i128, phase 0 runs before this
+// check because it is
 // self-contained and locally valid regardless of the rest of the function.
 //
 // Teardown order
@@ -104,6 +107,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/ADT/STLExtras.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
@@ -196,6 +200,7 @@ bool isSupportedOpcode(const llvm::Instruction *I) {
   case llvm::Instruction::Trunc:
   case llvm::Instruction::ZExt:
   case llvm::Instruction::SExt:
+  case llvm::Instruction::BitCast:
   case llvm::Instruction::Add:
   case llvm::Instruction::Sub:
   case llvm::Instruction::Mul:
@@ -215,11 +220,58 @@ bool isSupportedOpcode(const llvm::Instruction *I) {
   }
 }
 
-/// Every illegal type the pass can rewrite must be a scalar integer that fits
-/// into a legal type. Illegal integers nested in vectors or wider than 64 bits
-/// are not supported by the promotion logic.
+/// Scalar illegal integers either fit a legal type or use the i128 limb map.
 bool isPromotableIllegalTy(const llvm::Type *T) {
-  return isIllegalIntTy(T) && getPromotedWidth(T->getIntegerBitWidth()) != 0;
+  return isIllegalIntTy(T) &&
+         (T->isIntegerTy(128) || getPromotedWidth(T->getIntegerBitWidth()) != 0);
+}
+
+bool usesI128(const llvm::Instruction &I) {
+  if (I.getType()->isIntegerTy(128))
+    return true;
+  for (const llvm::Use &U : I.operands())
+    if (U->getType()->isIntegerTy(128))
+      return true;
+  return false;
+}
+
+bool isSupportedI128(const llvm::Instruction &I, const llvm::DataLayout &DL) {
+  switch (I.getOpcode()) {
+  case llvm::Instruction::Load:
+    return llvm::cast<llvm::LoadInst>(I).isSimple();
+  case llvm::Instruction::Store:
+    return llvm::cast<llvm::StoreInst>(I).isSimple();
+  case llvm::Instruction::PHI:
+  case llvm::Instruction::Select:
+  case llvm::Instruction::ICmp:
+  case llvm::Instruction::And:
+  case llvm::Instruction::Or:
+  case llvm::Instruction::Xor:
+  case llvm::Instruction::Shl:
+  case llvm::Instruction::LShr:
+  case llvm::Instruction::AShr:
+    return true;
+  case llvm::Instruction::Trunc:
+  case llvm::Instruction::ZExt:
+  case llvm::Instruction::SExt: {
+    llvm::Type *Other = I.getType()->isIntegerTy(128)
+                            ? I.getOperand(0)->getType() : I.getType();
+    return Other->isIntegerTy() && Other->getIntegerBitWidth() <= 64;
+  }
+  case llvm::Instruction::BitCast: {
+    llvm::Type *Other = I.getType()->isIntegerTy(128)
+                            ? I.getOperand(0)->getType() : I.getType();
+    auto *VT = llvm::dyn_cast<llvm::FixedVectorType>(Other);
+    if (!VT || DL.getTypeSizeInBits(VT) != 128)
+      return false;
+    llvm::Type *Element = VT->getElementType();
+    return (Element->isIntegerTy() &&
+            isLegalWidth(Element->getIntegerBitWidth())) ||
+           Element->isHalfTy() || Element->isFloatTy() || Element->isDoubleTy();
+  }
+  default:
+    return false;
+  }
 }
 
 bool hasIllegalOperand(const llvm::Instruction *I) {
@@ -272,6 +324,14 @@ private:
                       llvm::Value *PromotedVal);
 
   llvm::Value *rewriteInstruction(llvm::Instruction *I);
+  struct Limbs {
+    llvm::Value *Lo;
+    llvm::Value *Hi;
+  };
+  Limbs getLimbs(llvm::Value *V);
+  llvm::Value *rewriteI128(llvm::Instruction *I);
+  Limbs shiftLimbs(llvm::IRBuilder<> &B, Limbs V, Limbs Amount,
+                   unsigned Opcode);
 
   /// Makes sure that phi nodes created by the pass are well formed, even if
   /// legalization was aborted half way through.
@@ -284,6 +344,8 @@ private:
   llvm::SmallVector<llvm::AllocaInst *, 8> IllegalAllocas;
   llvm::DenseMap<llvm::Value *, llvm::Value *> Promoted;
   llvm::DenseMap<llvm::PHINode *, llvm::PHINode *> PhiMap;
+  llvm::DenseMap<llvm::Value *, Limbs> Wide;
+  llvm::DenseMap<llvm::PHINode *, Limbs> WidePhis;
 };
 
 llvm::Value *IntWidthLegalizer::extractBits(llvm::IRBuilder<> &B,
@@ -479,8 +541,8 @@ bool IntWidthLegalizer::splitWideStores() {
 //
 //  * opcodes outside the supported set, including volatile/atomic accesses
 //    and calls taking or returning an illegal type,
-//  * illegal types that do not fit into a legal one (>64 bits); these are
-//    only handled by phase 0 for plain copies,
+//  * illegal types that neither fit into a legal one nor use the i128 mapping;
+//    these are only handled by phase 0 for plain copies,
 //  * illegal-typed operands that are neither instructions, constant ints nor
 //    undef, as there would be no way to derive a promoted counterpart.
 //
@@ -499,7 +561,9 @@ bool IntWidthLegalizer::collectWork() {
       if (!isIllegalIntTy(I.getType()) && !hasIllegalOperand(&I))
         continue;
 
-      if (!isSupportedOpcode(&I)) {
+      if (!isSupportedOpcode(&I) ||
+          (usesI128(I) && !isSupportedI128(I, DL)) ||
+          (I.getOpcode() == llvm::Instruction::BitCast && !usesI128(I))) {
         HIPSYCL_DEBUG_WARNING
             << "LegalizeIntWidthsPass: Unsupported instruction using an "
                "integer type of non-standard bit width in function "
@@ -514,8 +578,7 @@ bool IntWidthLegalizer::collectWork() {
             << "); clspv may reject this kernel\n";
       };
 
-      // The promotion logic only supports scalar integers that fit into a
-      // legal type.
+      // Computations must fit into a legal type or use the i128 limb mapping.
       if (isIllegalIntTy(I.getType()) && !isPromotableIllegalTy(I.getType())) {
         reject("Integer type too wide to be promoted to a legal width");
         return false;
@@ -560,6 +623,8 @@ llvm::Value *IntWidthLegalizer::getPromoted(llvm::Value *V) {
   if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(V))
     return llvm::ConstantInt::get(PromTy,
                                   CI->getValue().zext(PromTy->getBitWidth()));
+  if (llvm::isa<llvm::PoisonValue>(V))
+    return llvm::PoisonValue::get(PromTy);
   if (llvm::isa<llvm::UndefValue>(V))
     return llvm::UndefValue::get(PromTy);
 
@@ -601,6 +666,213 @@ llvm::Value *IntWidthLegalizer::adjustWidth(llvm::IRBuilder<> &B,
   return B.CreateZExt(V, TargetTy);
 }
 
+IntWidthLegalizer::Limbs IntWidthLegalizer::getLimbs(llvm::Value *V) {
+  auto It = Wide.find(V);
+  if (It != Wide.end())
+    return It->second;
+  auto *Ty = llvm::Type::getInt64Ty(F.getContext());
+  if (auto *C = llvm::dyn_cast<llvm::ConstantInt>(V))
+    return {llvm::ConstantInt::get(Ty, C->getValue().trunc(64)),
+            llvm::ConstantInt::get(Ty, C->getValue().lshr(64).trunc(64))};
+  if (llvm::isa<llvm::PoisonValue>(V))
+    return {llvm::PoisonValue::get(Ty), llvm::PoisonValue::get(Ty)};
+  if (llvm::isa<llvm::UndefValue>(V))
+    return {llvm::UndefValue::get(Ty), llvm::UndefValue::get(Ty)};
+  llvm_unreachable("Missing i128 counterpart");
+}
+
+IntWidthLegalizer::Limbs IntWidthLegalizer::shiftLimbs(
+    llvm::IRBuilder<> &B, Limbs V, Limbs Amount, unsigned Opcode) {
+  auto *Ty = B.getInt64Ty();
+  auto C = [&](uint64_t N) { return llvm::ConstantInt::get(Ty, N); };
+  // Every emitted i64 shift is in [0, 63], including the unused select arms.
+  // In particular, the cross-limb contribution at shift zero must be zero,
+  // not a shift by 64 (which would make the whole result poison).
+  llvm::Value *N = B.CreateAnd(Amount.Lo, C(63));
+  llvm::Value *Reverse = B.CreateAnd(B.CreateSub(C(64), N), C(63));
+  llvm::Value *Zero = B.CreateICmpEQ(N, C(0));
+  llvm::Value *Small = B.CreateICmpULT(Amount.Lo, C(64));
+  llvm::Value *Valid = B.CreateAnd(B.CreateICmpEQ(Amount.Hi, C(0)),
+                                   B.CreateICmpULT(Amount.Lo, C(128)));
+  llvm::Value *Lo;
+  llvm::Value *Hi;
+  if (Opcode == llvm::Instruction::Shl) {
+    llvm::Value *Cross = B.CreateSelect(Zero, C(0),
+                                        B.CreateLShr(V.Lo, Reverse));
+    Lo = B.CreateSelect(Small, B.CreateShl(V.Lo, N), C(0));
+    Hi = B.CreateSelect(Small, B.CreateOr(B.CreateShl(V.Hi, N), Cross),
+                         B.CreateShl(V.Lo, N));
+  } else {
+    const bool Signed = Opcode == llvm::Instruction::AShr;
+    llvm::Value *HighShift = Signed ? B.CreateAShr(V.Hi, N)
+                                    : B.CreateLShr(V.Hi, N);
+    llvm::Value *Cross = B.CreateSelect(Zero, C(0),
+                                        B.CreateShl(V.Hi, Reverse));
+    Lo = B.CreateSelect(Small, B.CreateOr(B.CreateLShr(V.Lo, N), Cross),
+                         HighShift);
+    Hi = B.CreateSelect(Small, HighShift,
+                         Signed ? B.CreateAShr(V.Hi, C(63)) : C(0));
+  }
+  // An i128 source is a single value: poison in either limb must also reach a
+  // limb that the shift otherwise fills with zeros. Bitwise masking does not
+  // introduce poison for undef, unlike a self-comparison used as a guard.
+  llvm::Value *SourceZero = B.CreateAnd(B.CreateOr(V.Lo, V.Hi), C(0));
+  Lo = B.CreateOr(Lo, SourceZero);
+  Hi = B.CreateOr(Hi, SourceZero);
+  auto *Poison = llvm::PoisonValue::get(Ty);
+  return {B.CreateSelect(Valid, Lo, Poison),
+          B.CreateSelect(Valid, Hi, Poison)};
+}
+
+llvm::Value *IntWidthLegalizer::rewriteI128(llvm::Instruction *I) {
+  llvm::IRBuilder<> B{I};
+  auto *Ty = B.getInt64Ty();
+  auto C = [&](uint64_t N) { return llvm::ConstantInt::get(Ty, N); };
+  Limbs Result{nullptr, nullptr};
+  switch (I->getOpcode()) {
+  case llvm::Instruction::Load:
+  case llvm::Instruction::Store: {
+    auto *LI = llvm::dyn_cast<llvm::LoadInst>(I);
+    auto *SI = llvm::dyn_cast<llvm::StoreInst>(I);
+    llvm::Value *Ptr = LI ? LI->getPointerOperand() : SI->getPointerOperand();
+    llvm::Align Alignment = LI ? LI->getAlign() : SI->getAlign();
+    if (SI)
+      Result = getLimbs(SI->getValueOperand());
+    for (unsigned Index = 0; Index != 2; ++Index) {
+      MemoryChunk Chunk{Index * 8u, 64};
+      llvm::Value *ChunkPtr = getChunkPtr(B, Ptr, Chunk, Ty);
+      llvm::Value *&Limb = (Index == 0) == DL.isLittleEndian()
+                              ? Result.Lo : Result.Hi;
+      llvm::Instruction *Access;
+      if (LI) {
+        auto *Load = B.CreateAlignedLoad(Ty, ChunkPtr,
+                                         getChunkAlign(Alignment, Chunk));
+        Limb = Load;
+        Access = Load;
+      } else {
+        Access = B.CreateAlignedStore(Limb, ChunkPtr,
+                                       getChunkAlign(Alignment, Chunk));
+      }
+      // Value/size-specific metadata (range, tbaa.struct, etc.) cannot be
+      // copied unchanged onto narrower accesses.
+      Access->copyMetadata(*I, {llvm::LLVMContext::MD_tbaa,
+                                llvm::LLVMContext::MD_alias_scope,
+                                llvm::LLVMContext::MD_noalias,
+                                llvm::LLVMContext::MD_nontemporal,
+                                llvm::LLVMContext::MD_access_group,
+                                llvm::LLVMContext::MD_invariant_load,
+                                llvm::LLVMContext::MD_invariant_group});
+    }
+    if (SI)
+      return nullptr;
+    break;
+  }
+  case llvm::Instruction::PHI: {
+    auto *Phi = llvm::cast<llvm::PHINode>(I);
+    Result = {llvm::PHINode::Create(Ty, Phi->getNumIncomingValues(),
+                                    Phi->getName() + ".lo", Phi),
+              llvm::PHINode::Create(Ty, Phi->getNumIncomingValues(),
+                                    Phi->getName() + ".hi", Phi)};
+    WidePhis[Phi] = Result;
+    break;
+  }
+  case llvm::Instruction::Select: {
+    Limbs T = getLimbs(I->getOperand(1));
+    Limbs E = getLimbs(I->getOperand(2));
+    Result = {B.CreateSelect(I->getOperand(0), T.Lo, E.Lo),
+              B.CreateSelect(I->getOperand(0), T.Hi, E.Hi)};
+    break;
+  }
+  case llvm::Instruction::ICmp: {
+    Limbs L = getLimbs(I->getOperand(0));
+    Limbs R = getLimbs(I->getOperand(1));
+    auto Pred = llvm::cast<llvm::ICmpInst>(I)->getPredicate();
+    if (Pred == llvm::CmpInst::ICMP_EQ)
+      return B.CreateAnd(B.CreateICmpEQ(L.Lo, R.Lo),
+                          B.CreateICmpEQ(L.Hi, R.Hi));
+    if (Pred == llvm::CmpInst::ICMP_NE)
+      return B.CreateOr(B.CreateICmpNE(L.Lo, R.Lo),
+                         B.CreateICmpNE(L.Hi, R.Hi));
+    auto Strict = llvm::CmpInst::getStrictPredicate(Pred);
+    auto LowPred = llvm::ICmpInst::getUnsignedPredicate(Pred);
+    return B.CreateOr(B.CreateICmp(Strict, L.Hi, R.Hi),
+                       B.CreateAnd(B.CreateICmpEQ(L.Hi, R.Hi),
+                                    B.CreateICmp(LowPred, L.Lo, R.Lo)));
+  }
+  case llvm::Instruction::Trunc: {
+    llvm::Type *Dst = I->getType();
+    if (isIllegalIntTy(Dst))
+      Dst = getPromotedTy(Dst);
+    return adjustWidth(B, getLimbs(I->getOperand(0)).Lo, Dst);
+  }
+  case llvm::Instruction::ZExt:
+  case llvm::Instruction::SExt: {
+    llvm::Value *Src = I->getOperand(0);
+    unsigned Width = Src->getType()->getIntegerBitWidth();
+    if (isIllegalIntTy(Src->getType()))
+      Src = getPromoted(Src);
+    bool Signed = I->getOpcode() == llvm::Instruction::SExt;
+    Src = Signed ? signExtendWithin(B, Src, Width)
+                 : maskToWidth(B, Src, Width);
+    Result.Lo = Signed ? B.CreateSExtOrTrunc(Src, Ty) : adjustWidth(B, Src, Ty);
+    Result.Hi = Signed ? B.CreateAShr(Result.Lo, C(63)) : C(0);
+    break;
+  }
+  case llvm::Instruction::BitCast: {
+    auto *VT = llvm::FixedVectorType::get(Ty, 2);
+    if (I->getType()->isIntegerTy(128)) {
+      llvm::Value *V = B.CreateBitCast(I->getOperand(0), VT);
+      Result = {B.CreateExtractElement(V, B.getInt32(DL.isLittleEndian() ? 0 : 1)),
+                B.CreateExtractElement(V, B.getInt32(DL.isLittleEndian() ? 1 : 0))};
+    } else {
+      Limbs V = getLimbs(I->getOperand(0));
+      llvm::Value *Vector = llvm::PoisonValue::get(VT);
+      Vector = B.CreateInsertElement(Vector, V.Lo,
+                                      B.getInt32(DL.isLittleEndian() ? 0 : 1));
+      Vector = B.CreateInsertElement(Vector, V.Hi,
+                                      B.getInt32(DL.isLittleEndian() ? 1 : 0));
+      return B.CreateBitCast(Vector, I->getType());
+    }
+    break;
+  }
+  default: {
+    Limbs L = getLimbs(I->getOperand(0));
+    Limbs R = getLimbs(I->getOperand(1));
+    auto *Op = llvm::cast<llvm::BinaryOperator>(I);
+    unsigned Opcode = I->getOpcode();
+    if (Opcode == llvm::Instruction::Shl ||
+        Opcode == llvm::Instruction::LShr ||
+        Opcode == llvm::Instruction::AShr) {
+      Result = shiftLimbs(B, L, R, Opcode);
+      llvm::Value *Valid = B.getTrue();
+      auto equal = [&](Limbs A, Limbs E) {
+        return B.CreateAnd(B.CreateICmpEQ(A.Lo, E.Lo),
+                            B.CreateICmpEQ(A.Hi, E.Hi));
+      };
+      if (Op->isExact())
+        Valid = equal(shiftLimbs(B, Result, R, llvm::Instruction::Shl), L);
+      if (Op->hasNoUnsignedWrap())
+        Valid = B.CreateAnd(Valid, equal(
+            shiftLimbs(B, Result, R, llvm::Instruction::LShr), L));
+      if (Op->hasNoSignedWrap())
+        Valid = B.CreateAnd(Valid, equal(
+            shiftLimbs(B, Result, R, llvm::Instruction::AShr), L));
+      if (Op->isExact() || Op->hasNoUnsignedWrap() || Op->hasNoSignedWrap()) {
+        auto *Poison = llvm::PoisonValue::get(Ty);
+        Result = {B.CreateSelect(Valid, Result.Lo, Poison),
+                  B.CreateSelect(Valid, Result.Hi, Poison)};
+      }
+    } else {
+      Result = {B.CreateBinOp(Op->getOpcode(), L.Lo, R.Lo),
+                B.CreateBinOp(Op->getOpcode(), L.Hi, R.Hi)};
+    }
+    break;
+  }
+  }
+  Wide[I] = Result;
+  return Result.Lo;
+}
+
 llvm::Value *IntWidthLegalizer::emitSplitLoad(llvm::IRBuilder<> &B,
                                               llvm::LoadInst *LI,
                                               llvm::Type *CombineTy) {
@@ -614,9 +886,12 @@ llvm::Value *IntWidthLegalizer::emitSplitLoad(llvm::IRBuilder<> &B,
     llvm::Value *ChunkVal =
         B.CreateAlignedLoad(ChunkTy, Ptr, getChunkAlign(LI->getAlign(), C));
     llvm::Value *Extended = adjustWidth(B, ChunkVal, CombineTy);
-    if (C.OffsetInBytes != 0)
+    unsigned Shift = DL.isLittleEndian()
+                         ? C.OffsetInBytes * 8
+                         : ((BitWidth + 7) / 8) * 8 - C.OffsetInBytes * 8 - C.Bits;
+    if (Shift != 0)
       Extended = B.CreateShl(
-          Extended, llvm::ConstantInt::get(CombineTy, C.OffsetInBytes * 8));
+          Extended, llvm::ConstantInt::get(CombineTy, Shift));
     Result = Result ? B.CreateOr(Result, Extended) : Extended;
   }
   return Result;
@@ -636,15 +911,20 @@ void IntWidthLegalizer::emitSplitStore(llvm::IRBuilder<> &B,
     auto *ChunkTy = llvm::IntegerType::get(F.getContext(), C.Bits);
     llvm::Value *Ptr = getChunkPtr(B, SI->getPointerOperand(), C, ChunkTy);
     llvm::Value *ChunkVal = Val;
-    if (C.OffsetInBytes != 0)
+    unsigned Shift = DL.isLittleEndian()
+                         ? C.OffsetInBytes * 8
+                         : ((BitWidth + 7) / 8) * 8 - C.OffsetInBytes * 8 - C.Bits;
+    if (Shift != 0)
       ChunkVal = B.CreateLShr(
-          ChunkVal, llvm::ConstantInt::get(Val->getType(), C.OffsetInBytes * 8));
+          ChunkVal, llvm::ConstantInt::get(Val->getType(), Shift));
     ChunkVal = adjustWidth(B, ChunkVal, ChunkTy);
     B.CreateAlignedStore(ChunkVal, Ptr, getChunkAlign(SI->getAlign(), C));
   }
 }
 
 llvm::Value *IntWidthLegalizer::rewriteInstruction(llvm::Instruction *I) {
+  if (usesI128(*I))
+    return rewriteI128(I);
   llvm::IRBuilder<> B{I};
 
   auto promotedOperand = [&](unsigned Idx) -> llvm::Value * {
@@ -785,6 +1065,17 @@ void IntWidthLegalizer::completeCreatedPhis() {
                        Old->getIncomingBlock(Idx));
     }
   }
+  for (auto &Entry : WidePhis) {
+    llvm::PHINode *Old = Entry.first;
+    for (llvm::Value *Limb : {Entry.second.Lo, Entry.second.Hi}) {
+      auto *New = llvm::cast<llvm::PHINode>(Limb);
+      while (New->getNumIncomingValues() < Old->getNumIncomingValues()) {
+        const unsigned Idx = New->getNumIncomingValues();
+        New->addIncoming(llvm::PoisonValue::get(New->getType()),
+                         Old->getIncomingBlock(Idx));
+      }
+    }
+  }
 }
 
 // Phase 3 and 4: rewrite all collected instructions in RPO order, patch the
@@ -805,6 +1096,8 @@ bool IntWidthLegalizer::rewrite() {
       }
       continue;
     }
+    if (I->getType()->isIntegerTy(128))
+      continue;
     if (isIllegalIntTy(I->getType()))
       Promoted[I] = New;
     else
@@ -828,6 +1121,16 @@ bool IntWidthLegalizer::rewrite() {
       New->addIncoming(NewIn, Old->getIncomingBlock(i));
     }
   }
+  for (auto &Entry : WidePhis) {
+    llvm::PHINode *Old = Entry.first;
+    for (unsigned i = 0; i < Old->getNumIncomingValues(); ++i) {
+      Limbs In = getLimbs(Old->getIncomingValue(i));
+      llvm::cast<llvm::PHINode>(Entry.second.Lo)->addIncoming(
+          In.Lo, Old->getIncomingBlock(i));
+      llvm::cast<llvm::PHINode>(Entry.second.Hi)->addIncoming(
+          In.Hi, Old->getIncomingBlock(i));
+    }
+  }
 
   // Phase 4. The originals may still reference each other, and phi nodes in
   // loops form reference cycles, so drop all references first to break those
@@ -842,10 +1145,12 @@ bool IntWidthLegalizer::rewrite() {
 }
 
 bool IntWidthLegalizer::run() {
-  // Phase 0. Values wider than 64 bits have no legal type to be promoted to
-  // and are therefore handled by decomposing the stored value into chunks of
-  // legal width. This is independent of the legality check below.
-  bool Changed = splitWideStores();
+  // Detect i128 before the legacy store splitter can mutate the function.
+  bool HasI128 = false;
+  for (llvm::BasicBlock &BB : F)
+    for (llvm::Instruction &I : BB)
+      HasI128 |= usesI128(I);
+  bool Changed = false;
 
   // Phase 1. Illegal types in the signature would require rewriting the
   // function itself along with all of its call sites, which is out of scope:
@@ -868,6 +1173,26 @@ bool IntWidthLegalizer::run() {
     return Changed;
   }
 
+  // i128 lowering is transactional: do not let the legacy tree extractor
+  // mutate stores before rejecting an unsupported use elsewhere.
+  if (!HasI128)
+    Changed = splitWideStores();
+  else {
+    llvm::ReversePostOrderTraversal<llvm::Function *> RPO{&F};
+    llvm::SmallPtrSet<llvm::BasicBlock *, 16> Reachable;
+    for (llvm::BasicBlock *BB : RPO)
+      Reachable.insert(BB);
+    for (llvm::BasicBlock &BB : F)
+      for (llvm::Instruction &I : BB)
+        if ((usesI128(I) && !isSupportedI128(I, DL)) ||
+            (!Reachable.count(&BB) &&
+             (isIllegalIntTy(I.getType()) || hasIllegalOperand(&I)))) {
+          HIPSYCL_DEBUG_WARNING
+              << "LegalizeIntWidthsPass: Unsupported i128 use in function "
+              << F.getName().str() << "; clspv may reject this kernel\n";
+          return false;
+        }
+  }
   // Phase 2.
   if (!collectWork())
     return Changed;

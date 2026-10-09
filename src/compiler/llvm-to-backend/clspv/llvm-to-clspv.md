@@ -144,29 +144,51 @@ on if an instruction is a memory access or a computation:
 %wide = or i64 (zext i32 %lo to i64), shl (zext i16 %hi to i64), 32
 ```
 
-  Values wider than 64 bits can only be handled when they are a plain
-  load/store copy, which is then split into chunk sized load/store pairs.
+  Scalar `i128` values are represented by two `i64` limbs, never recombined
+  into an illegal-width integer. Loads and stores use two accesses with the
+  original address space and appropriately adjusted alignment. Limb ordering
+  follows the module's endianness. Copies load both limbs before storing
+  either, so overlapping source and destination regions retain their original
+  load/store semantics rather than becoming an unsafe `memcpy`.
   Allocas of illegal types are replaced by equally sized `i8` arrays.
 
-* Computations are promoted** to the next larger legal width, e.g. `i48`
+* Computations below 64 bits are promoted to the next larger legal width, e.g. `i48`
   becomes `i64`. Only the low bits of a promoted value carry meaning, so
   operands of width-sensitive operations are masked (`lshr`, `udiv`, `urem`,
   unsigned `icmp`, `zext`) or sign extended (`ashr`, `sdiv`, `srem`, signed
   `icmp`, `sext`) to the original width first.
 
-Instructions that cannot be rewritten, e.g. calls taking a non-standard
-integer type, or volatile/atomic accesses, leave the function unmodified and
-emit a warning.
+* `i128` computations use the two-limb representation for bitwise operations,
+  PHIs, selects, comparisons, shifts, extensions from and truncations to
+  integers of at most 64 bits, and bitcasts to and from supported fixed
+  128-bit vectors. Oversized shifts and violations of shift flags preserve
+  poison behavior. General `i128` arithmetic, division/remainder, wide
+  function signatures, and atomic/volatile wide accesses remain unsupported
+  and are diagnosed rather than silently narrowed.
+
+Other widths above 64 bits retain the restricted chunk-extraction path for
+supported copy and packing patterns; they are not generally legalized.
+
+For functions containing `i128`, unsupported instructions are checked before
+rewriting, leaving the function unmodified and emitting a warning. The legacy
+chunk-extraction phase for other wide widths can independently rewrite supported
+stores before the remaining instructions are checked.
+
+Legalization runs last in AdaptiveCpp's clspv preparation pipeline, after the
+ordinary optimization and address-space transformations, so those passes cannot
+recreate the wide integers it removes. A final diagnostic sweep reports any
+remaining illegal scalar integer types; this is not a promise to legalize
+arbitrary LLVM integer operations.
 
 The transform algorithm is performed by a single reverse post-order (RPO)
 walk of the function:
 
 | Phase | Step | Description |
 | ----- | ---- | ----------- |
-| 0 | `splitWideCopies()` | Rewrites values too wide to be promoted (>64 bits) |
+| 0 | Wide preflight / `splitWideStores()` | Checks `i128` support, or extracts supported stores of other wide values |
 | 1 | Signature check | Aborts on illegal argument or return types |
 | 2 | `collectWork()` | RPO scan that checks legality and builds the work list |
-| 3 | `rewrite()` | Rewrites instructions in RPO order, then patches phi nodes |
+| 3 | `rewrite()` | Promotes narrow integers or builds `i128` limbs, then patches phi nodes |
 | 4 | Teardown | Erases the original instructions |
 | 5 | Alloca rewrite | Replaces allocas of illegal type with byte arrays |
 | 6 | `warnOnRemainingIllegalTypes()` | Diagnostic sweep over all blocks |
@@ -177,6 +199,19 @@ rewritten in phase 3, all of its instruction operands have already been
 rewritten and have an entry in the value map. The only
 exception is a phi operand arriving on a back edge, so phi nodes are created
 with no incoming values and patched in a second pass once the walk completes.
+
+The pass-level regression suite can be built independently of a Vulkan device
+or clspv installation:
+
+```sh
+cmake -S tests/compiler/int-widths -B /tmp/acpp-int-width-tests \
+  -DLLVM_DIR=/path/to/llvm/lib/cmake/llvm
+cmake --build /tmp/acpp-int-width-tests
+ctest --test-dir /tmp/acpp-int-width-tests --output-on-failure
+```
+
+The suite verifies transformed IR, checks unsupported cases, and compares
+executable results against the original wide-integer operations.
 
 ### AddrSpaceCastRemovalPass
 

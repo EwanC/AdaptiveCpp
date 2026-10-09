@@ -420,10 +420,10 @@ bool LLVMToCLSPVTranslator::optimizeFlavoredIR(llvm::Module &M,
   MPM.addPass(llvm::createModuleToFunctionPassAdaptor(MemsetLoweringPass()));
   MPM.addPass(
       llvm::createModuleToFunctionPassAdaptor(FoldChainedGEPsPass()));
-  MPM.addPass(llvm::createModuleToFunctionPassAdaptor(LegalizeIntWidthsPass()));
   MPM.addPass(
       llvm::createModuleToFunctionPassAdaptor(AddrSpaceCastRemovalPass()));
   MPM.addPass(ConstantAddrSpacePass());
+  MPM.addPass(llvm::createModuleToFunctionPassAdaptor(LegalizeIntWidthsPass()));
   MPM.run(M, *PH.ModuleAnalysisManager);
 
   return Result;

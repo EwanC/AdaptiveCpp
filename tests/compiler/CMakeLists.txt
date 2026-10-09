@@ -12,3 +12,9 @@ add_custom_target(check-pcuda
 
 add_custom_target(check)
 add_dependencies(check check-cbs check-sscp check-reflection check-stdpar check-pcuda)
+
+option(ACPP_TEST_INT_WIDTHS "Build LLVM integer legalization regression tests" OFF)
+if(ACPP_TEST_INT_WIDTHS)
+  enable_testing()
+  add_subdirectory(int-widths)
+endif()
