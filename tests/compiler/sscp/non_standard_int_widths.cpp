@@ -64,6 +64,27 @@ int main() {
               << " " << vec_ptr[i][1] << " " << vec_ptr[i][2] << std::endl;
   }
 
+  // Relational builtins on vec types return a vector of integers which can be
+  // packed into a single wide integer, e.g. an `i128` for `vec<float, 4>`.
+  sycl::vec<float, 4> *vec4_ptr =
+      sycl::malloc_shared<sycl::vec<float, 4>>(1, q);
+  int *rel_ptr = sycl::malloc_shared<int>(4, q);
+  vec4_ptr[0] = sycl::vec<float, 4>{1.f, 0.f, -1.f, 2.f};
+
+  q.submit([&](sycl::handler &cgh) {
+     cgh.single_task([=]() {
+       auto finite = sycl::isfinite(vec4_ptr[0]);
+       for (int i = 0; i < 4; ++i)
+         rel_ptr[i] = finite[i] != 0 ? 1 : 0;
+     });
+   }).wait();
+
+  // CHECK: finite: 1 1 1 1
+  std::cout << "finite: " << rel_ptr[0] << " " << rel_ptr[1] << " "
+            << rel_ptr[2] << " " << rel_ptr[3] << std::endl;
+
+  sycl::free(vec4_ptr, q);
+  sycl::free(rel_ptr, q);
   sycl::free(short_ptr, q);
   sycl::free(char_ptr, q);
   sycl::free(vec_ptr, q);

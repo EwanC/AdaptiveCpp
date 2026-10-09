@@ -142,8 +142,16 @@ This pass rewrites such types using two different transformations:
 %wide = or i64 (zext i32 %lo to i64), shl (zext i16 %hi to i64), 32
 ```
 
-  Values wider than 64 bits can only be handled when they are a plain
-  load/store copy, which is then split into chunk sized load/store pairs.
+  Values wider than 64 bits, e.g. the `i128` produced for a
+  `sycl::vec<float, 4>`, have no legal type they could be promoted to. They are
+  therefore only handled where they are stored, by decomposing the stored value
+  into chunks of legal width so that the wide value is never materialized. This
+  succeeds whenever each chunk can be computed from the defining expression -
+  supported are loads, constants, `zext`, `trunc`, `and`, `or`, `xor`, `select`
+  and shifts by a constant amount, which covers both plain copies of wide
+  objects and the `zext`/`shl`/`or` trees SROA builds when it packs the
+  component wise results of a vector builtin into a single scalar. Once the
+  stores are rewritten, the wide computation is trivially dead and removed.
   Allocas of illegal types are replaced by equally sized `i8` arrays.
 
 * Computations are **promoted** to the next larger legal width, e.g. `i48`
@@ -160,7 +168,7 @@ phases:
 
 | Phase | Step | Description |
 | ----- | ---- | ----------- |
-| 0 | `splitWideCopies()` | Rewrites values too wide to be promoted (>64 bits) |
+| 0 | `splitWideStores()` | Rewrites stores of values too wide to be promoted (>64 bits) |
 | 1 | Signature check | Aborts on illegal argument or return types |
 | 2 | `collectWork()` | RPO scan that checks legality and builds the work list |
 | 3 | `rewrite()` | Rewrites instructions in RPO order, then patches phi nodes |
@@ -213,6 +221,10 @@ that definitions are destroyed after their users. Instructions whose result
 type was already legal, e.g. an `icmp i48` producing an `i1`, are instead
 replaced via `replaceAllUsesWith()` during phase 3, because they can have users
 outside the work list.
+
+Every rejection emits a warning naming the function and the offending opcode,
+so a kernel that is not fully legalized can be diagnosed from the compiler log
+without having to inspect an IR dump.
 
 **Limitations.** RPO only visits blocks reachable from the entry block, so
 illegal types in unreachable code are not rewritten. Such code is normally

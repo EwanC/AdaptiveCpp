@@ -40,7 +40,7 @@
 // function instead of an iterative worklist fixpoint. The pass runs in six
 // phases, see `IntWidthLegalizer::run()`:
 //
-//   0. `splitWideCopies()`   - handle values too wide to promote (>64 bits)
+//   0. `splitWideStores()`   - handle values too wide to promote (>64 bits)
 //   1. signature check       - bail out on illegal argument/return types
 //   2. `collectWork()`       - RPO scan, legality check, build work list
 //   3. `rewrite()`           - rewrite in RPO order, patch phis afterwards
@@ -112,7 +112,9 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ValueHandle.h>
 #include <llvm/Support/Alignment.h>
+#include <llvm/Transforms/Utils/Local.h>
 
 namespace hipsycl {
 namespace compiler {
@@ -237,9 +239,17 @@ public:
   bool run();
 
 private:
-  /// Replaces `store iN (load iN ptr), ptr` copies of values too wide to be
-  /// promoted by a sequence of chunk sized load/store pairs.
-  bool splitWideCopies();
+  /// Replaces stores of values too wide to be promoted by a sequence of chunk
+  /// sized stores.
+  bool splitWideStores();
+
+  /// Materializes the bits [\p LoBit, \p LoBit + \p Bits) of \p V as a value
+  /// of type i\p Bits, without ever creating a value of illegal width.
+  ///
+  /// Returns null if the bits cannot be extracted, in which case no
+  /// instructions have been added that are not trivially dead.
+  llvm::Value *extractBits(llvm::IRBuilder<> &B, llvm::Value *V,
+                           unsigned LoBit, unsigned Bits);
 
   bool collectWork();
   bool rewrite();
@@ -276,7 +286,127 @@ private:
   llvm::DenseMap<llvm::PHINode *, llvm::PHINode *> PhiMap;
 };
 
-bool IntWidthLegalizer::splitWideCopies() {
+llvm::Value *IntWidthLegalizer::extractBits(llvm::IRBuilder<> &B,
+                                           llvm::Value *V, unsigned LoBit,
+                                           unsigned Bits) {
+  auto *ResTy = llvm::IntegerType::get(F.getContext(), Bits);
+  const unsigned Width = V->getType()->getIntegerBitWidth();
+  assert(LoBit + Bits <= Width && "Requested bits outside of value");
+
+  if (llvm::isa<llvm::UndefValue>(V))
+    return llvm::UndefValue::get(ResTy);
+
+  if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(V))
+    return llvm::ConstantInt::get(ResTy, CI->getValue().lshr(LoBit).trunc(Bits));
+
+  // A plain load of a wide value: load the requested chunk directly.
+  if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(V)) {
+    if (!LI->isSimple() || LoBit % 8 != 0 || Bits % 8 != 0 ||
+        !isLegalWidth(Bits))
+      return nullptr;
+    const MemoryChunk C{LoBit / 8, Bits};
+    if (C.OffsetInBytes % (Bits / 8) != 0)
+      return nullptr;
+    llvm::IRBuilder<> LB{LI};
+    llvm::Value *Ptr = getChunkPtr(LB, LI->getPointerOperand(), C, ResTy);
+    return LB.CreateAlignedLoad(ResTy, Ptr, getChunkAlign(LI->getAlign(), C));
+  }
+
+  if (auto *I = llvm::dyn_cast<llvm::Instruction>(V)) {
+    switch (I->getOpcode()) {
+    case llvm::Instruction::ZExt: {
+      // Bits at or above the source width are known to be zero.
+      llvm::Value *Src = I->getOperand(0);
+      const unsigned SrcWidth = Src->getType()->getIntegerBitWidth();
+      if (LoBit >= SrcWidth)
+        return llvm::ConstantInt::get(ResTy, 0);
+      const unsigned SubBits = std::min(Bits, SrcWidth - LoBit);
+      if (!isLegalWidth(SubBits))
+        return nullptr;
+      llvm::Value *Sub = extractBits(B, Src, LoBit, SubBits);
+      if (!Sub)
+        return nullptr;
+      return SubBits == Bits ? Sub : B.CreateZExt(Sub, ResTy);
+    }
+    case llvm::Instruction::Trunc: {
+      llvm::Value *Src = I->getOperand(0);
+      // Truncation only drops high bits, so the requested bits are unchanged.
+      return extractBits(B, Src, LoBit, Bits);
+    }
+    case llvm::Instruction::Shl: {
+      auto *Amount = llvm::dyn_cast<llvm::ConstantInt>(I->getOperand(1));
+      if (!Amount)
+        return nullptr;
+      const uint64_t Sh = Amount->getZExtValue();
+      // Bits below the shift amount are zero.
+      if (LoBit + Bits <= Sh)
+        return llvm::ConstantInt::get(ResTy, 0);
+      if (LoBit >= Sh)
+        return extractBits(B, I->getOperand(0), LoBit - Sh, Bits);
+      llvm::Value *Sub = extractBits(B, I->getOperand(0), 0, Bits);
+      if (!Sub)
+        return nullptr;
+      return B.CreateShl(Sub, llvm::ConstantInt::get(ResTy, Sh - LoBit));
+    }
+    case llvm::Instruction::LShr: {
+      auto *Amount = llvm::dyn_cast<llvm::ConstantInt>(I->getOperand(1));
+      if (!Amount)
+        return nullptr;
+      const uint64_t Sh = Amount->getZExtValue();
+      if (LoBit + Sh >= Width)
+        return llvm::ConstantInt::get(ResTy, 0);
+      if (LoBit + Bits + Sh > Width)
+        return nullptr;
+      return extractBits(B, I->getOperand(0), LoBit + Sh, Bits);
+    }
+    case llvm::Instruction::And:
+    case llvm::Instruction::Or:
+    case llvm::Instruction::Xor: {
+      // Bitwise operations act on each bit independently.
+      llvm::Value *L = extractBits(B, I->getOperand(0), LoBit, Bits);
+      if (!L)
+        return nullptr;
+      llvm::Value *R = extractBits(B, I->getOperand(1), LoBit, Bits);
+      if (!R)
+        return nullptr;
+      return B.CreateBinOp(
+          static_cast<llvm::Instruction::BinaryOps>(I->getOpcode()), L, R);
+    }
+    case llvm::Instruction::Select: {
+      llvm::Value *T = extractBits(B, I->getOperand(1), LoBit, Bits);
+      if (!T)
+        return nullptr;
+      llvm::Value *Fa = extractBits(B, I->getOperand(2), LoBit, Bits);
+      if (!Fa)
+        return nullptr;
+      return B.CreateSelect(I->getOperand(0), T, Fa);
+    }
+    default:
+      break;
+    }
+  }
+
+  // Opaque value: it can only be taken apart if it is of legal width itself.
+  if (!isLegalWidth(Width))
+    return nullptr;
+  llvm::Value *Shifted =
+      LoBit == 0 ? V
+                 : B.CreateLShr(V, llvm::ConstantInt::get(V->getType(), LoBit));
+  return Width == Bits ? Shifted : B.CreateTrunc(Shifted, ResTy);
+}
+
+// Phase 0: Rewrite stores of values that are too wide to be promoted.
+//
+// Values wider than 64 bits have no legal type they could be promoted to, so
+// the only way to legalize them is to never materialize them: the stored value
+// is decomposed into chunks of legal width that are stored individually. This
+// works whenever every chunk can be computed without constructing a wide value
+// itself, which `extractBits()` checks.
+//
+// Typical sources of such values are `sycl::vec<float, 3/4>` return values of
+// relational builtins, which SROA packs into a single `i128` built from a tree
+// of `zext`/`shl`/`or`, and plain copies of wide objects.
+bool IntWidthLegalizer::splitWideStores() {
   llvm::SmallVector<llvm::StoreInst *, 8> WideStores;
   for (llvm::BasicBlock &BB : F) {
     for (llvm::Instruction &I : BB) {
@@ -284,51 +414,57 @@ bool IntWidthLegalizer::splitWideCopies() {
       if (!SI || !SI->isSimple())
         continue;
       llvm::Type *ValTy = SI->getValueOperand()->getType();
-      if (isIllegalIntTy(ValTy) && getPromotedWidth(ValTy->getIntegerBitWidth()) == 0)
+      if (isIllegalIntTy(ValTy) &&
+          getPromotedWidth(ValTy->getIntegerBitWidth()) == 0)
         WideStores.push_back(SI);
     }
   }
 
   bool Changed = false;
+  llvm::SmallVector<llvm::WeakTrackingVH, 16> MaybeDead;
   for (llvm::StoreInst *SI : WideStores) {
     llvm::Value *Val = SI->getValueOperand();
     const unsigned BitWidth = Val->getType()->getIntegerBitWidth();
     auto Chunks = computeChunks(BitWidth);
 
+    // Build the chunk values first: if any of them cannot be extracted the
+    // store is left alone, and the instructions created so far are dead and
+    // cleaned up below.
     llvm::IRBuilder<> B{SI};
-    auto *LI = llvm::dyn_cast<llvm::LoadInst>(Val);
-    auto *CI = llvm::dyn_cast<llvm::ConstantInt>(Val);
-
-    if (LI && LI->isSimple() && LI->getType() == Val->getType()) {
-      // Pure copy: split into chunk sized load/store pairs.
-      for (const MemoryChunk &C : Chunks) {
-        auto *ChunkTy = llvm::IntegerType::get(F.getContext(), C.Bits);
-        llvm::Value *SrcPtr =
-            getChunkPtr(B, LI->getPointerOperand(), C, ChunkTy);
-        llvm::Value *DstPtr =
-            getChunkPtr(B, SI->getPointerOperand(), C, ChunkTy);
-        llvm::Value *ChunkVal =
-            B.CreateAlignedLoad(ChunkTy, SrcPtr, getChunkAlign(LI->getAlign(), C));
-        B.CreateAlignedStore(ChunkVal, DstPtr, getChunkAlign(SI->getAlign(), C));
+    llvm::SmallVector<llvm::Value *, 4> ChunkValues;
+    bool Extracted = true;
+    for (const MemoryChunk &C : Chunks) {
+      llvm::Value *ChunkVal = extractBits(B, Val, C.OffsetInBytes * 8, C.Bits);
+      if (!ChunkVal) {
+        Extracted = false;
+        break;
       }
-      SI->eraseFromParent();
-      if (LI->use_empty())
-        LI->eraseFromParent();
-      Changed = true;
-    } else if (CI) {
-      for (const MemoryChunk &C : Chunks) {
-        auto *ChunkTy = llvm::IntegerType::get(F.getContext(), C.Bits);
-        llvm::Value *DstPtr =
-            getChunkPtr(B, SI->getPointerOperand(), C, ChunkTy);
-        llvm::APInt ChunkVal =
-            CI->getValue().lshr(C.OffsetInBytes * 8).trunc(C.Bits);
-        B.CreateAlignedStore(llvm::ConstantInt::get(ChunkTy, ChunkVal), DstPtr,
-                             getChunkAlign(SI->getAlign(), C));
-      }
-      SI->eraseFromParent();
-      Changed = true;
+      ChunkValues.push_back(ChunkVal);
     }
+
+    for (llvm::Value *V : ChunkValues)
+      if (auto *I = llvm::dyn_cast<llvm::Instruction>(V))
+        MaybeDead.push_back(I);
+
+    if (!Extracted)
+      continue;
+
+    for (size_t i = 0; i < Chunks.size(); ++i) {
+      const MemoryChunk &C = Chunks[i];
+      auto *ChunkTy = llvm::IntegerType::get(F.getContext(), C.Bits);
+      llvm::Value *DstPtr = getChunkPtr(B, SI->getPointerOperand(), C, ChunkTy);
+      B.CreateAlignedStore(ChunkValues[i], DstPtr, getChunkAlign(SI->getAlign(), C));
+    }
+
+    if (auto *ValI = llvm::dyn_cast<llvm::Instruction>(Val))
+      MaybeDead.push_back(ValI);
+    SI->eraseFromParent();
+    Changed = true;
   }
+
+  // Remove the now dead wide value computations, as they would otherwise still
+  // contain illegal types and cause the legalization below to bail out.
+  llvm::RecursivelyDeleteTriviallyDeadInstructionsPermissive(MaybeDead);
 
   return Changed;
 }
@@ -371,18 +507,33 @@ bool IntWidthLegalizer::collectWork() {
         return false;
       }
 
+      auto reject = [&](const char *Reason) {
+        HIPSYCL_DEBUG_WARNING
+            << "LegalizeIntWidthsPass: " << Reason << " in function "
+            << F.getName().str() << " (" << I.getOpcodeName()
+            << "); clspv may reject this kernel\n";
+      };
+
       // The promotion logic only supports scalar integers that fit into a
       // legal type.
-      if (isIllegalIntTy(I.getType()) && !isPromotableIllegalTy(I.getType()))
+      if (isIllegalIntTy(I.getType()) && !isPromotableIllegalTy(I.getType())) {
+        reject("Integer type too wide to be promoted to a legal width");
         return false;
+      }
       for (llvm::Use &U : I.operands()) {
         llvm::Type *OpTy = U.get()->getType();
-        if (isIllegalIntTy(OpTy) && !isPromotableIllegalTy(OpTy))
+        if (isIllegalIntTy(OpTy) && !isPromotableIllegalTy(OpTy)) {
+          reject("Operand of an integer type too wide to be promoted to a "
+                 "legal width");
           return false;
+        }
         if (isIllegalIntTy(OpTy) && !llvm::isa<llvm::Instruction>(U.get()) &&
             !llvm::isa<llvm::ConstantInt>(U.get()) &&
-            !llvm::isa<llvm::UndefValue>(U.get()))
+            !llvm::isa<llvm::UndefValue>(U.get())) {
+          reject("Operand of non-standard integer width with no legalizable "
+                 "counterpart");
           return false;
+        }
       }
 
       Work.push_back(&I);
@@ -691,21 +842,31 @@ bool IntWidthLegalizer::rewrite() {
 }
 
 bool IntWidthLegalizer::run() {
-  // Phase 0. Values wider than 64 bits have no legal type to be promoted to,
-  // so they are only supported as plain memory copies, which this phase
-  // rewrites in place. It is independent of the legality check below.
-  bool Changed = splitWideCopies();
+  // Phase 0. Values wider than 64 bits have no legal type to be promoted to
+  // and are therefore handled by decomposing the stored value into chunks of
+  // legal width. This is independent of the legality check below.
+  bool Changed = splitWideStores();
 
   // Phase 1. Illegal types in the signature would require rewriting the
   // function itself along with all of its call sites, which is out of scope:
   // by the time this pass runs the backend has aggressively inlined the
   // module, so such signatures are not expected in practice.
+  auto rejectSignature = [&]() {
+    HIPSYCL_DEBUG_WARNING
+        << "LegalizeIntWidthsPass: Signature of function " << F.getName().str()
+        << " uses an integer type of non-standard bit width; clspv may reject "
+           "this kernel\n";
+  };
   for (const llvm::Argument &A : F.args()) {
-    if (isIllegalIntTy(A.getType()))
+    if (isIllegalIntTy(A.getType())) {
+      rejectSignature();
       return Changed;
+    }
   }
-  if (isIllegalIntTy(F.getReturnType()))
+  if (isIllegalIntTy(F.getReturnType())) {
+    rejectSignature();
     return Changed;
+  }
 
   // Phase 2.
   if (!collectWork())
