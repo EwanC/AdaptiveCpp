@@ -1,0 +1,215 @@
+name: Self-hosted Vulkan CI
+
+# Persistent GPU hosts must not execute untrusted pull request code.
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-vulkan:
+    if: github.repository_id == '140986400'
+    name: Vulkan on ${{ matrix.vendor }} with LLVM 19
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vendor: NVIDIA
+            runner: [self-hosted, gpu-nvidia]
+            parallelism: 16
+            icd: nvidia_icd.json
+            vendor_id: 4318
+          - vendor: AMD
+            runner: [self-hosted, gpu-amd]
+            parallelism: 3
+            icd: radeon_icd.x86_64.json
+            vendor_id: 4098
+          - vendor: Intel
+            runner: [self-hosted, gpu-intel, xe2]
+            parallelism: 10
+            icd: intel_icd.x86_64.json
+            vendor_id: 32902
+    env:
+      LLVM_VERSION: '19'
+      CLSPV_COMMIT: 3d017c6d751cdabed1a5051b20c6bf5f71e8fd32
+      BUILD_JOBS: ${{ matrix.parallelism }}
+      GPU_VENDOR: ${{ matrix.vendor }}
+      GPU_VENDOR_ID: ${{ matrix.vendor_id }}
+      GPU_ICD: ${{ matrix.icd }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install LLVM and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg software-properties-common
+          if ! test -f "/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm/LLVMConfig.cmake"; then
+            . /etc/os-release
+            curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | gpg --dearmor | sudo tee /usr/share/keyrings/acpp-ci-llvm.gpg >/dev/null
+            echo "deb [signed-by=/usr/share/keyrings/acpp-ci-llvm.gpg] https://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$LLVM_VERSION main" \
+              | sudo tee /etc/apt/sources.list.d/acpp-ci-llvm.list
+            sudo apt-get update
+          fi
+          sudo apt-get install -y "clang-$LLVM_VERSION" "llvm-$LLVM_VERSION-dev" \
+            "llvm-$LLVM_VERSION-tools" "libclang-$LLVM_VERSION-dev" "libomp-$LLVM_VERSION-dev" \
+            cmake ninja-build build-essential libboost-all-dev libnuma-dev libtbb-dev \
+            python3-venv
+          python3 -m venv "$RUNNER_TEMP/vulkan-ci-venv"
+          "$RUNNER_TEMP/vulkan-ci-venv/bin/python" -m pip install lit==18.1.8
+          echo "$RUNNER_TEMP/vulkan-ci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.4.341.1
+          cache: true
+          stripdown: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Provision hardware Vulkan driver
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/vulkan-logs"
+          if [[ "$GPU_VENDOR" != NVIDIA ]]; then
+            sudo add-apt-repository ppa:kisak/turtle -y
+            sudo apt-get update
+            sudo apt-get install -y mesa-vulkan-drivers
+            # Runner/container provisioning must bind /dev/dri with render-node access.
+            compgen -G '/dev/dri/renderD*' >/dev/null
+          else
+            # The host must expose its matching NVIDIA Vulkan ICD, driver libraries,
+            # and /dev/nvidia* to the runner; do not replace the host driver here.
+            test -c /dev/nvidiactl
+          fi
+          icd=$(find /etc/vulkan/icd.d /usr/share/vulkan/icd.d \
+            -name "$GPU_ICD" -print 2>/dev/null | sort | head -n 1 || true)
+          if [[ -z "$icd" ]]; then
+            echo "::error::Missing $GPU_VENDOR hardware Vulkan ICD; provision the runner's driver and device bindings."
+            exit 1
+          fi
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          tee "$GITHUB_WORKSPACE/vulkan-logs/icd.json" < "$icd"
+
+      - name: Record Vulkan devices and driver
+        run: vulkaninfo --summary 2>&1 | tee "$GITHUB_WORKSPACE/vulkan-logs/vulkaninfo.log"
+
+      - name: Cache clspv
+        id: cache-clspv
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/clspv-install
+          key: vulkan-clspv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.vendor }}-llvm19-3d017c6d751cdabed1a5051b20c6bf5f71e8fd32
+
+      - name: Checkout clspv
+        if: steps.cache-clspv.outputs.cache-hit != 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: google/clspv
+          ref: ${{ env.CLSPV_COMMIT }}
+          path: clspv
+          persist-credentials: false
+
+      - name: Build clspv
+        if: steps.cache-clspv.outputs.cache-hit != 'true'
+        run: |
+          cd "$GITHUB_WORKSPACE/clspv"
+          python3 utils/fetch_sources.py
+          cmake -GNinja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="/usr/bin/clang-$LLVM_VERSION" \
+            -DCMAKE_CXX_COMPILER="/usr/bin/clang++-$LLVM_VERSION" \
+            -DLLVM_PARALLEL_LINK_JOBS=1 \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/clspv-install"
+          cmake --build build --target install --parallel "$BUILD_JOBS"
+
+      - name: Clear JIT cache and build AdaptiveCpp
+        run: |
+          rm -rf "$HOME/.acpp"
+          cmake -GNinja -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build-vulkan" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="/usr/bin/clang-$LLVM_VERSION" \
+            -DCMAKE_CXX_COMPILER="/usr/bin/clang++-$LLVM_VERSION" \
+            -DCLANG_EXECUTABLE_PATH="/usr/bin/clang++-$LLVM_VERSION" \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm" \
+            -DWITH_VULKAN_BACKEND=ON \
+            -DWITH_CUDA_BACKEND=OFF \
+            -DWITH_ROCM_BACKEND=OFF \
+            -DWITH_OPENCL_BACKEND=OFF \
+            -DWITH_LEVEL_ZERO_BACKEND=OFF \
+            -DACPP_CLSPV_PATH="$GITHUB_WORKSPACE/clspv-install/bin/clspv" \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build-vulkan/install"
+          cmake --build "$GITHUB_WORKSPACE/build-vulkan" --target install --parallel "$BUILD_JOBS"
+          echo "$GITHUB_WORKSPACE/build-vulkan/install/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/build-vulkan/install/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Select and verify hardware Vulkan device
+        run: |
+          acpp-info -l 2>&1 | tee "$GITHUB_WORKSPACE/vulkan-logs/acpp-info-list.log"
+          acpp-info > "$GITHUB_WORKSPACE/vulkan-logs/acpp-info-details.log"
+          cat "$GITHUB_WORKSPACE/vulkan-logs/acpp-info-details.log"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          log = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "vulkan-logs/acpp-info-details.log"
+          devices = []
+          for block in re.split(r"(?m)^Device \d+:\s*$", log.read_text())[1:]:
+              fields = dict(re.findall(r"(?m)^  ([^:\n]+): (.*)$", block))
+              if (fields.get("Backend") == "Vulkan"
+                      and fields.get("Is GPU") == "1"
+                      and fields.get("vendor_id") == os.environ["GPU_VENDOR_ID"]):
+                  devices.append(fields["Name"])
+          if not devices:
+              raise SystemExit("Expected vendor's hardware Vulkan GPU is unavailable; refusing CPU fallback")
+          name = devices[0]
+          if any(c in name for c in ":;\r\n"):
+              raise SystemExit("Device name cannot be represented safely in a visibility mask")
+          # lit propagates ACPP_VISIBILITY_MASK, but not Vulkan loader ICD variables.
+          # Select by hardware name so discovery order changes cannot select a CPU.
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"ACPP_VISIBILITY_MASK=vk:{name}\n")
+          PY
+
+      - name: Build generic SSCP tests
+        id: build-tests
+        run: |
+          cmake -GNinja -S "$GITHUB_WORKSPACE/tests" -B "$GITHUB_WORKSPACE/build-vulkan/tests-sscp" \
+            -DCMAKE_C_COMPILER="/usr/bin/clang-$LLVM_VERSION" \
+            -DCMAKE_CXX_COMPILER="/usr/bin/clang++-$LLVM_VERSION" \
+            -DACPP_TARGETS=generic \
+            -DAdaptiveCpp_DIR="$GITHUB_WORKSPACE/build-vulkan/install/lib/cmake/AdaptiveCpp" \
+            -DLLVM_DIR="/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm"
+          cmake --build "$GITHUB_WORKSPACE/build-vulkan/tests-sscp" --parallel "$BUILD_JOBS"
+
+      # See https://github.com/AdaptiveCpp/AdaptiveCpp/issues/2163 for disabled tests.
+      - name: Run SYCL tests
+        run: |
+          cd "$GITHUB_WORKSPACE/build-vulkan/tests-sscp"
+          ./sycl_tests -t '!buffer_tests/*' 2>&1 | tee "$GITHUB_WORKSPACE/vulkan-logs/sycl-tests.log"
+
+      - name: Run lit SSCP tests
+        if: ${{ !cancelled() && steps.build-tests.outcome == 'success' }}
+        run: |
+          cmake --build "$GITHUB_WORKSPACE/build-vulkan/tests-sscp" --target check-sscp \
+            2>&1 | tee "$GITHUB_WORKSPACE/vulkan-logs/sscp-tests.log"
+
+      - name: Upload Vulkan diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-${{ matrix.vendor }}-llvm19-logs
+          path: ${{ github.workspace }}/vulkan-logs
+          if-no-files-found: warn
