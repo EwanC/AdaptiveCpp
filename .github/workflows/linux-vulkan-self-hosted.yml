@@ -62,13 +62,14 @@ jobs:
               | sudo tee /etc/apt/sources.list.d/acpp-ci-llvm.list
             sudo apt-get update
           fi
-          sudo apt-get install -y "clang-$LLVM_VERSION" "llvm-$LLVM_VERSION-dev" \
+          sudo apt-get install -y "clang-$LLVM_VERSION" "lld-$LLVM_VERSION" "llvm-$LLVM_VERSION-dev" \
             "llvm-$LLVM_VERSION-tools" "libclang-$LLVM_VERSION-dev" "libomp-$LLVM_VERSION-dev" \
             cmake ninja-build build-essential libboost-all-dev libnuma-dev libtbb-dev \
             python3-venv
           python3 -m venv "$RUNNER_TEMP/vulkan-ci-venv"
           "$RUNNER_TEMP/vulkan-ci-venv/bin/python" -m pip install lit==18.1.8
           echo "$RUNNER_TEMP/vulkan-ci-venv/bin" >> "$GITHUB_PATH"
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
 
       - name: Install Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@v1
