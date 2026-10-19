@@ -17,6 +17,7 @@
 #include "hipSYCL/runtime/code_object_invoker.hpp"
 #include "hipSYCL/runtime/generic/async_worker.hpp"
 #include "hipSYCL/runtime/vk/vk_code_object.hpp"
+#include "hipSYCL/runtime/vk/vk_interop.hpp"
 #include "hipSYCL/runtime/vk/vk_profiling.hpp"
 #include <mutex>
 #include <vulkan/vulkan_raii.hpp>
@@ -66,6 +67,8 @@ public:
   result wait() override;
 
   device_id get_device() const override;
+  // Returns a pointer to a vk_queue_handle describing the VkQueue that this
+  // queue submits to. Used for interop through sycl::interop_handle.
   void *get_native_type() const override;
   vk_hardware_context *get_dev_ctx() { return _dev_ctx; }
   uint64_t get_semaphore_counter_value() const {
@@ -107,6 +110,7 @@ private:
   vk_hardware_manager *_hw_manager;
   const std::size_t _device_index;
   vk_hardware_context *_dev_ctx;
+  vk_queue_handle _native_handle{};
 
   // Members for command submission
   uint32_t _cmd_buf_alloc_size =
