@@ -57,6 +57,9 @@ vk_queue::vk_queue(vk_hardware_manager *hw_manager, std::size_t device_index)
       static_cast<vk_hardware_context *>(hw_manager->get_device(device_index));
   auto &device = _dev_ctx->get_device();
 
+  _native_handle = vk_queue_native_handle{*_dev_ctx->get_queue(),
+                                          _dev_ctx->get_queue_index(), *device};
+
   _dev_has_khr_calibrated_timestamps = _dev_ctx->are_extensions_enabled(
       vk_device_extensions::khr_calibrated_timestamps);
 
@@ -767,10 +770,7 @@ device_id vk_queue::get_device() const {
 }
 
 void *vk_queue::get_native_type() const {
-  assert(false && "not implemented");
-  HIPSYCL_DEBUG_WARNING << "vk_queue::get_native_type() not implemented"
-                        << std::endl;
-  return nullptr;
+  return const_cast<vk_queue_native_handle *>(&_native_handle);
 }
 
 result vk_queue::submit_sscp_kernel_from_code_object(
