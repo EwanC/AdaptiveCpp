@@ -1701,6 +1701,106 @@ BOOST_AUTO_TEST_CASE(get_native_vk_allocation) {
   s::free(ptr, q);
 }
 #endif // ACPP_EXT_GET_NATIVE_ALLOCATION
+
+#if defined(__unix__)
+#include <unistd.h>
+
+BOOST_AUTO_TEST_CASE(vk_external_memory) {
+  namespace s = sycl;
+
+  s::queue q;
+  if (q.get_device().get_backend() != s::backend::vk) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_memory: not a Vulkan device");
+    return;
+  }
+
+  if (!s::vk_interop::has_external_memory_support(q.get_device())) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_memory: device does not support "
+                       "VK_KHR_external_memory_fd");
+    return;
+  }
+
+  constexpr std::size_t n = 64;
+  const s::property_list props{s::property::usm::AdaptiveCpp_exportable{}};
+  int *ptr = s::malloc_device<int>(n, q.get_device(), q.get_context(), props);
+  BOOST_REQUIRE(ptr != nullptr);
+
+  // The allocation is usable like any other device USM allocation
+  q.fill(ptr, 1, n).wait();
+
+  auto handle = s::vk_interop::export_memory(ptr + 1, q.get_context());
+  BOOST_CHECK(handle.fd >= 0);
+  BOOST_CHECK(handle.allocation_size >= n * sizeof(int));
+  BOOST_CHECK_EQUAL(handle.offset, sizeof(int));
+  BOOST_CHECK_EQUAL(handle.size, (n - 1) * sizeof(int));
+  if (handle.fd >= 0) {
+    close(handle.fd);
+  }
+
+  s::free(ptr, q);
+
+  // Allocations that were not requested to be exportable cannot be exported
+  int *not_exportable = s::malloc_device<int>(n, q);
+  BOOST_REQUIRE(not_exportable != nullptr);
+  auto invalid =
+      s::vk_interop::export_memory(not_exportable, q.get_context());
+  BOOST_CHECK(invalid.fd < 0);
+  s::free(not_exportable, q);
+}
+
+BOOST_AUTO_TEST_CASE(vk_external_semaphore) {
+  namespace s = sycl;
+
+  const s::property_list props{s::property::queue::in_order{}};
+  s::queue producer{props};
+  if (producer.get_device().get_backend() != s::backend::vk) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_semaphore: not a Vulkan device");
+    return;
+  }
+
+  if (!s::vk_interop::has_external_semaphore_support(producer.get_device())) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_semaphore: device does not "
+                       "support VK_KHR_external_semaphore_fd");
+    return;
+  }
+
+  s::context ctx = producer.get_context();
+  if (ctx.get_devices().size() > 1) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_semaphore: context contains more "
+                       "than 1 device");
+    return;
+  }
+
+  constexpr std::size_t n = 1;
+  int *value = s::malloc_device<int>(n, producer);
+  BOOST_REQUIRE(value != nullptr);
+
+  s::event produced = producer.single_task([=]() { *value = 41; });
+  auto exported = s::vk_interop::export_semaphore(produced, ctx);
+  BOOST_REQUIRE(exported.fd >= 0);
+
+  // Importing the payload again gives a semaphore sharing the same timeline,
+  // which an application driving its own VkDevice would do.
+  s::vk_interop::imported_semaphore semaphore{ctx, exported.fd};
+  BOOST_REQUIRE(static_cast<bool>(semaphore));
+
+  s::event imported =
+      s::vk_interop::make_event(semaphore, exported.value, ctx);
+
+  s::queue consumer{ctx, producer.get_device(), props};
+  s::event consumed = consumer.submit([&](s::handler &cgh) {
+    cgh.depends_on(imported);
+    cgh.single_task([=]() { *value += 1; });
+  });
+  consumed.wait();
+
+  int result = 0;
+  consumer.copy(value, &result, n).wait();
+  BOOST_CHECK_EQUAL(result, 42);
+
+  s::free(value, producer);
+}
+#endif // __unix__
 #endif // ACPP_GLUE_VK_INTEROP_AVAILABLE
 
 BOOST_AUTO_TEST_SUITE_END()

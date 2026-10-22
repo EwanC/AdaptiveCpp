@@ -816,6 +816,27 @@ Example:
 
 ```
 
+### `ACPP_EXT_EXPORTABLE_ALLOCATION_PROPERTY`
+This extension allows a user to request a USM allocation that can be shared with another API or device.
+This can be done by using the `AdaptiveCpp_exportable` property on USM allocation functions.
+Backends that cannot satisfy the request ignore the property.
+
+In the Vulkan backend the allocation is made exportable as an opaque file descriptor with
+`sycl::vk_interop::export_memory()`, which allows sharing it with a `VkDevice` that the application
+owns itself. See the [Vulkan backend documentation](install-vulkan.md#sharing-with-a-vkdevice-the-application-owns).
+
+Example:
+```
+  sycl::queue q;
+
+  int *p = sycl::malloc_device<int>(
+      n, q.get_device(), q.get_context(),
+      sycl::property_list{sycl::property::usm::AdaptiveCpp_exportable{}});
+
+  sycl::free(p, q);
+
+```
+
 ### `ACPP_EXT_DEVICE_FREE_MEMORY`
 
 Adds a device aspect and device information descriptor for querying the backend-reported amount of free device memory.

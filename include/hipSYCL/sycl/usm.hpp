@@ -49,6 +49,13 @@ private:
   const std::vector<size_t> _numa_nodes;
 };
 
+// Request an allocation that can be shared with other APIs or devices. In the
+// Vulkan backend this makes the allocation exportable as an opaque file
+// descriptor, see sycl::vk_interop::export_memory().
+class AdaptiveCpp_exportable : public detail::usm_property
+{
+};
+
 }
 
 namespace {
@@ -64,6 +71,10 @@ namespace {
                 .get_numa_nodes());
 
     }// AdaptiveCpp_target_numa_node
+
+    if(propList.has_property<property::usm::AdaptiveCpp_exportable>()) {
+        hints.AdaptiveCpp_exportable.emplace(true);
+    }// AdaptiveCpp_exportable
 
     return hints;
   }

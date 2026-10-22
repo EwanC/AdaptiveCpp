@@ -24,6 +24,7 @@ vk_hardware_context::vk_hardware_context(
     const vk::raii::PhysicalDevice &phys_device, VkInstance instance,
     int dev_id, uint16_t features)
     : _physical_device(phys_device), _instance(instance), _dev_id(dev_id),
+      _imported_semaphores(std::make_unique<imported_semaphore_store>()),
       _physical_dev_features(features), _enabled_extensions(0) {
   _properties = phys_device.getProperties();
 
@@ -110,13 +111,19 @@ vk_hardware_context::vk_hardware_context(
 
   // Portability subset extensions used to enable MoltenVK.
   // Calibrated timestamps extension used to enable event profiling.
-  std::array<std::pair<const char *, uint16_t>, 3> optional_exts = {
+  // External memory/semaphore fd extensions used to share allocations and
+  // synchronization with a VkDevice that the application owns itself.
+  std::array<std::pair<const char *, uint16_t>, 5> optional_exts = {
       std::make_pair(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
                      vk_device_extensions::khr_portability_subset),
       std::make_pair(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
                      vk_device_extensions::khr_calibrated_timestamps),
       std::make_pair(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
-                     vk_device_extensions::ext_calibrated_timestamps)};
+                     vk_device_extensions::ext_calibrated_timestamps),
+      std::make_pair(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+                     vk_device_extensions::khr_external_memory_fd),
+      std::make_pair(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+                     vk_device_extensions::khr_external_semaphore_fd)};
   std::vector<const char *> enable_ext_names;
   for (auto opt_ext : optional_exts) {
     bool ext_supported = std::any_of(
@@ -472,6 +479,88 @@ vk_allocator *vk_hardware_context::get_allocator() { return _allocator.get(); }
 vk_device_native_handle vk_hardware_context::get_native_device_handle() const {
   return vk_device_native_handle{_instance, *_physical_device, *_device,
                                  _queue_index};
+}
+
+bool vk_hardware_context::has_external_semaphore_support() const {
+  return are_extensions_enabled(vk_device_extensions::khr_external_semaphore_fd);
+}
+
+bool vk_hardware_context::export_semaphore_fd(VkSemaphore semaphore,
+                                              int &out_fd) const {
+  if (!has_external_semaphore_support()) {
+    print_error(__acpp_here(),
+                error_info{"vk_hardware_context: VK_KHR_external_semaphore_fd "
+                           "is not supported by this device"});
+    return false;
+  }
+
+  if (semaphore == VK_NULL_HANDLE) {
+    print_error(__acpp_here(),
+                error_info{"vk_hardware_context: cannot export an invalid "
+                           "semaphore"});
+    return false;
+  }
+
+  try {
+    vk::SemaphoreGetFdInfoKHR get_fd_info{
+        vk::Semaphore{semaphore},
+        vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd};
+    out_fd = _device.getSemaphoreFdKHR(get_fd_info);
+  } catch (const std::exception &e) {
+    print_error(__acpp_here(),
+                error_info{std::string("vk_hardware_context: could not export "
+                                       "semaphore file descriptor - ")
+                               .append(e.what())});
+    return false;
+  }
+
+  return true;
+}
+
+VkSemaphore vk_hardware_context::import_timeline_semaphore_fd(int fd) {
+  if (!has_external_semaphore_support()) {
+    print_error(__acpp_here(),
+                error_info{"vk_hardware_context: VK_KHR_external_semaphore_fd "
+                           "is not supported by this device"});
+    return VK_NULL_HANDLE;
+  }
+
+  try {
+    // Timeline semaphores only support permanent payload imports, so the
+    // semaphore the payload is imported into is created fresh here and kept
+    // alive until the user destroys it again.
+    vk::StructureChain<vk::SemaphoreCreateInfo, vk::SemaphoreTypeCreateInfo>
+        semaphore_info({}, {vk::SemaphoreType::eTimeline, 0});
+    vk::raii::Semaphore semaphore = _device.createSemaphore(
+        semaphore_info.get<vk::SemaphoreCreateInfo>());
+
+    vk::ImportSemaphoreFdInfoKHR import_info{
+        *semaphore, vk::SemaphoreImportFlags{},
+        vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd, fd};
+    _device.importSemaphoreFdKHR(import_info);
+
+    VkSemaphore handle = *semaphore;
+    {
+      std::lock_guard<std::mutex> lock{_imported_semaphores->_mutex};
+      _imported_semaphores->_semaphores.insert(
+          {handle, std::move(semaphore)});
+    }
+
+    HIPSYCL_DEBUG_INFO << "vk_hardware_context: imported timeline semaphore "
+                       << handle << std::endl;
+    return handle;
+  } catch (const std::exception &e) {
+    print_error(__acpp_here(),
+                error_info{std::string("vk_hardware_context: could not import "
+                                       "semaphore file descriptor - ")
+                               .append(e.what())});
+    return VK_NULL_HANDLE;
+  }
+}
+
+void vk_hardware_context::destroy_imported_semaphore(VkSemaphore semaphore) {
+  std::lock_guard<std::mutex> lock{_imported_semaphores->_mutex};
+  _imported_semaphores->_semaphores.erase(semaphore);
 }
 
 static VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(

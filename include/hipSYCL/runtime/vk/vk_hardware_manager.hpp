@@ -13,6 +13,8 @@
 
 #include "../hardware.hpp"
 #include "hipSYCL/runtime/vk/vk_native_objects.hpp"
+#include <mutex>
+#include <unordered_map>
 #include <vulkan/vulkan_raii.hpp>
 
 namespace hipsycl {
@@ -49,11 +51,14 @@ enum extension_bits : uint16_t {
   khr_portability_subset = 1 << 0,
   khr_calibrated_timestamps = 1 << 1,
   ext_calibrated_timestamps = 1 << 2,
+  khr_external_memory_fd = 1 << 3,
+  khr_external_semaphore_fd = 1 << 4,
 };
 } // namespace vk_device_extensions
 
 class vk_hardware_context : public hardware_context,
-                            public vk_native_device_provider {
+                            public vk_native_device_provider,
+                            public vk_native_external_semaphore_provider {
 public:
   vk_hardware_context(const vk::raii::PhysicalDevice &, VkInstance instance,
                       int dev_id, uint16_t features);
@@ -85,6 +90,15 @@ public:
   void init();
 
   vk_device_native_handle get_native_device_handle() const override;
+
+  bool has_external_semaphore_support() const override;
+  bool export_semaphore_fd(VkSemaphore semaphore, int &out_fd) const override;
+  VkSemaphore import_timeline_semaphore_fd(int fd) override;
+  void destroy_imported_semaphore(VkSemaphore semaphore) override;
+
+  bool has_external_memory_support() const {
+    return are_extensions_enabled(vk_device_extensions::khr_external_memory_fd);
+  }
 
   const vk::raii::Device &get_device() const { return _device; }
   const vk::raii::PhysicalDevice &get_physical_device() const {
@@ -123,6 +137,15 @@ private:
   size_t _max_alloc_size{};
 
   int _dev_id;
+  // Semaphores created on this device from imported external payloads, owned
+  // by the runtime on behalf of the user until explicitly destroyed. Held
+  // indirectly so that vk_hardware_context remains movable.
+  struct imported_semaphore_store {
+    std::unordered_map<VkSemaphore, vk::raii::Semaphore> _semaphores;
+    std::mutex _mutex;
+  };
+  std::unique_ptr<imported_semaphore_store> _imported_semaphores;
+
   uint16_t _physical_dev_features;
   uint16_t _enabled_extensions;
   std::unique_ptr<vk_allocator> _allocator;

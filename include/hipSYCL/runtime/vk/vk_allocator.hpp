@@ -35,10 +35,27 @@ struct vk_alloc_info {
   vk::raii::Buffer _buffer;
   vk::raii::DeviceMemory _dev_mem;
   vk::MemoryPropertyFlags _mem_flags;
+  // Size of _dev_mem, which may exceed the number of requested bytes
+  vk::DeviceSize _allocation_size = 0;
+  // Index of the memory type _dev_mem was allocated from
+  uint32_t _memory_type_index = UINT32_MAX;
+  // Whether _dev_mem can be exported as an opaque file descriptor
+  bool _exportable = false;
+};
+
+// Result of creating a buffer that is backed by its own device memory
+// allocation, bound at offset 0.
+struct vk_buffer_allocation {
+  vk::raii::Buffer _buffer;
+  vk::raii::DeviceMemory _dev_mem;
+  vk::MemoryPropertyFlags _mem_flags;
+  vk::DeviceSize _allocation_size;
+  uint32_t _memory_type_index;
 };
 
 class vk_allocator : public backend_allocator,
-                     public vk_native_allocation_provider {
+                     public vk_native_allocation_provider,
+                     public vk_native_external_memory_provider {
 public:
   vk_allocator() {}
   vk_allocator(vk_hardware_context *hw_ctx, rt::device_id dev);
@@ -70,12 +87,20 @@ public:
   bool get_native_allocation(const void *ptr,
                              vk_allocation_native_handle &out) const override;
 
+  bool has_external_memory_support() const override;
+
+  bool
+  export_allocation_fd(const void *ptr,
+                       vk_external_memory_native_handle &out) const override;
+
   vk_alloc_info *staging_allocate(size_t size_bytes);
 
   // Creates a single buffer backed by allocated device memory, and created with
-  // properties which allow its device address returned
-  std::tuple<vk::raii::Buffer, vk::raii::DeviceMemory, vk::MemoryPropertyFlags>
-  create_device_address_buffer(vk::DeviceSize size);
+  // properties which allow its device address returned. If exportable is set,
+  // the memory is additionally created such that it can be shared with another
+  // Vulkan device through an opaque file descriptor.
+  vk_buffer_allocation create_device_address_buffer(vk::DeviceSize size,
+                                                    bool exportable = false);
 
   // Given a list of uniform buffers sets scraped from SPIR-V reflection
   // allocates enough memory for all of them, then creates buffers into the

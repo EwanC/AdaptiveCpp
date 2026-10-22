@@ -221,6 +221,10 @@ interop API is expressed with the Vulkan C API, it does not require Vulkan-HPP.
    and the number of remaining bytes.
 * `hipsycl::rt::vk_queue_native_handle`: a `VkQueue`, its queue family index and the `VkDevice` it belongs to.
 
+Applications that drive a `VkDevice` of their own share memory and
+synchronization with the backend through opaque file descriptors instead, see
+[Sharing with a VkDevice the application owns](#sharing-with-a-vkdevice-the-application-owns).
+
 `sycl::device` maps to `VkPhysicalDevice` and `sycl::context` to `VkDevice`,
 because a `VkPhysicalDevice` is an immutable description of the hardware, which
 is the role of `sycl::device`. While the logical device is the object
@@ -329,15 +333,135 @@ q.submit([&](sycl::handler &cgh) {
 });
 ```
 
+### Sharing with a VkDevice the application owns
+
+Using the `VkDevice` of the SYCL context for an application's own rendering is
+usually not possible: AdaptiveCpp creates its instance without `VK_KHR_surface`,
+its device without `VK_KHR_swapchain`, dynamic rendering or synchronization2,
+and deliberately picks the least capable compute queue family. An application
+that needs graphics, presentation, or any extension or feature the backend does
+not enable therefore has to keep its own `VkInstance`, `VkDevice` and queues.
+
+For this case the backend enables `VK_KHR_external_memory_fd` and
+`VK_KHR_external_semaphore_fd` where the device supports them, so that the two
+logical devices - which must be created from the same `VkPhysicalDevice` - can
+share memory and synchronization through opaque file descriptors. The API lives
+in `sycl::vk_interop`:
+
+| What                             | How                                                                 |
+| -------------------------------- | ------------------------------------------------------------------- |
+| Query memory sharing support     | `sycl::vk_interop::has_external_memory_support(device)`              |
+| Query semaphore sharing support  | `sycl::vk_interop::has_external_semaphore_support(device)`           |
+| Export a USM allocation          | `sycl::vk_interop::export_memory(ptr, context)`                      |
+| Export the semaphore of an event | `sycl::vk_interop::export_semaphore(event, context)`                 |
+| Import a timeline semaphore      | `sycl::vk_interop::imported_semaphore{context, fd}`                  |
+| Event for an imported timeline   | `sycl::vk_interop::make_event(imported_semaphore, value, context)`   |
+
+All exported file descriptors are owned by the caller: importing one transfers
+ownership to Vulkan, otherwise it has to be released with `close()`.
+
+#### Sharing memory
+
+USM allocations are only made exportable when explicitly requested with the
+`sycl::property::usm::AdaptiveCpp_exportable` property, since exporting
+constrains how the memory can be allocated. Exportable allocations behave like
+any other device USM allocation and are released with `sycl::free()`.
+
+```c++
+#include <sycl/sycl.hpp>
+#include <vulkan/vulkan_core.h>
+
+sycl::queue q;
+float *data = sycl::malloc_device<float>(
+    1024, q.get_device(), q.get_context(),
+    {sycl::property::usm::AdaptiveCpp_exportable{}});
+
+auto mem = sycl::vk_interop::export_memory(data, q.get_context());
+// mem.fd is an opaque file descriptor of the VkDeviceMemory backing the
+// allocation, mem.allocation_size its size, mem.memory_type_index the memory
+// type it was allocated from, and mem.offset / mem.size describe the queried
+// pointer within it.
+
+VkImportMemoryFdInfoKHR import_info{};
+import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+import_info.fd = mem.fd; // Vulkan takes ownership of the fd on success
+
+VkMemoryAllocateInfo alloc_info{};
+alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+alloc_info.pNext = &import_info;
+alloc_info.allocationSize = mem.allocation_size;
+alloc_info.memoryTypeIndex = mem.memory_type_index;
+// vkAllocateMemory() on the application's own VkDevice, then create a VkBuffer
+// with the usage the application needs (e.g. vertex or storage buffer) and
+// bind it to the imported memory at offset 0.
+```
+
+Each exportable allocation owns its entire `VkDeviceMemory`, so importing the
+file descriptor gives access to exactly that allocation. The importing device
+must be created from the same `VkPhysicalDevice`, since `memory_type_index` is
+only meaningful there. The application is responsible for creating its buffer
+with memory requirements that the imported memory satisfies, and - because the
+buffers are created with `VK_SHARING_MODE_EXCLUSIVE` - for queue family
+ownership transfers between the two devices.
+
+#### Sharing synchronization
+
+Events of the Vulkan backend are backed by timeline semaphores, which are
+created exportable when the device supports `VK_KHR_external_semaphore_fd`. The
+application imports the payload into its own device to wait for SYCL work:
+
+```c++
+sycl::event e = q.parallel_for(sycl::range<1>{1024},
+                               [=](sycl::id<1> i) { data[i] = i[0]; });
+
+auto sem = sycl::vk_interop::export_semaphore(e, q.get_context());
+// sem.fd refers to the timeline semaphore payload, sem.value is the value it
+// attains once the operation has completed. Import it with
+// VkImportSemaphoreFdInfoKHR into a timeline semaphore of the application's
+// device and wait for sem.value there.
+```
+
+As with the semaphore handed out by `sycl::get_native<sycl::backend::vk>(event)`,
+the application **must not signal values** on the imported payload: it is the
+timeline AdaptiveCpp uses internally. To let SYCL wait for application work,
+export a timeline semaphore of the application instead and import it into the
+SYCL context:
+
+```c++
+// vkGetSemaphoreFdKHR() on the application's own timeline semaphore ...
+sycl::vk_interop::imported_semaphore semaphore{q.get_context(), app_fd};
+
+// vkQueueSubmit2() signalling app_value on the application's semaphore ...
+sycl::event wait_for_app =
+    sycl::vk_interop::make_event(semaphore, app_value, q.get_context());
+
+q.submit([&](sycl::handler &cgh) {
+  cgh.depends_on(wait_for_app);
+  cgh.parallel_for(sycl::range<1>{1024}, [=](sycl::id<1> i) { data[i] *= 2; });
+});
+```
+
+The `imported_semaphore` owns the semaphore it creates inside the `VkDevice` of
+the SYCL context, and must outlive all events created from it. Because the
+mapping must be unambiguous, it requires a context containing exactly one
+Vulkan device.
+
+Memory barriers remain the responsibility of the application: AdaptiveCpp only
+makes its writes available up to its own barriers, so a buffer memory barrier
+with the appropriate stage and access masks is needed after waiting for
+AdaptiveCpp's work, and before signalling a semaphore value that AdaptiveCpp
+waits on.
+
 ### Limitations
 
 The interop API exposes the objects that AdaptiveCpp creates itself; it cannot
-currently adopt a `VkDevice` created by the application, and the backend does not
-enable `VK_KHR_external_memory` or `VK_KHR_external_semaphore`. Zero-copy
-sharing with an application that renders with Vulkan is therefore only possible
-if the application uses the `VkDevice` of the SYCL context, which it can obtain
-with `sycl::get_native<sycl::backend::vk>(context)`. There is no interop for
-`sycl::buffer`, images or samplers.
+adopt a `VkInstance` or `VkDevice` created by the application. Sharing with an
+application that drives its own Vulkan device is done with the external memory
+and semaphore file descriptors described above, which requires a Vulkan
+implementation supporting `VK_KHR_external_memory_fd` and
+`VK_KHR_external_semaphore_fd`, and therefore does not work with MoltenVK.
+There is no interop for `sycl::buffer`, images or samplers.
 
 ## Benchmarks
 
