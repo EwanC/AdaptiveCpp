@@ -158,7 +158,7 @@ of variables.
 
 All the runtime functionality and synchronization of SYCL is expected to work, although
 some optional features are not supported. Most notably only device USM is available,
-and not host or shared USM. Backend interop is supported for devices, contexts,
+and not host or shared USM. Backend interop is supported for devices, contexts, queues,
 events and USM allocations, see [Interoperability with Vulkan](#interoperability-with-vulkan).
 
 The holes in support arise from deficiencies in the compilation of kernel code. Features
@@ -213,11 +213,13 @@ interop API is expressed with the Vulkan C API, it does not require Vulkan-HPP.
 | Context      | `sycl::get_native<sycl::backend::vk>(context)`                      | `VkDevice`                                 |
 | Event        | `sycl::get_native<sycl::backend::vk>(event)`                        | `hipsycl::rt::vk_event_native_handle`      |
 | USM pointer  | `sycl::get_native_allocation<sycl::backend::vk>(ptr, context)`      | `hipsycl::rt::vk_allocation_native_handle` |
+| Queue        | `h.get_native_queue<sycl::backend::vk>()` inside a custom operation | `hipsycl::rt::vk_queue_native_handle`      |
 | Import event | `sycl::make_event<sycl::backend::vk>(handle, context)`              | `hipsycl::rt::vk_event_native_handle`      |
 
 * `hipsycl::rt::vk_event_native_handle`: a timeline `VkSemaphore`, its signal value and the `VkDevice` it belongs to.
 * `hipsycl::rt::vk_allocation_native_handle`: the `VkBuffer` backing the allocation, the offset of `ptr` within it,
    and the number of remaining bytes.
+* `hipsycl::rt::vk_queue_native_handle`: a `VkQueue`, its queue family index and the `VkDevice` it belongs to.
 
 `sycl::device` maps to `VkPhysicalDevice` and `sycl::context` to `VkDevice`,
 because a `VkPhysicalDevice` is an immutable description of the hardware, which
@@ -237,7 +239,11 @@ to find the device of the context the semaphore belongs to, which may only be
 left as `VK_NULL_HANDLE` if the context contains a single Vulkan device.
 
 `sycl::get_native<sycl::backend::vk>(queue)` is **not provided**, because
-AdaptiveCpp may use a different backend queue for each operation.
+AdaptiveCpp may use a different backend queue for each operation. A `VkQueue` is
+additionally externally synchronized, and must therefore only be used from
+inside a custom operation, where the runtime guarantees that it is not
+submitting to it concurrently. See the
+[custom operation documentation](enqueue-custom-operation.md).
 
 ### Sharing USM allocations
 
@@ -267,8 +273,9 @@ VkDescriptorBufferInfo buffer_info{allocation.buffer, allocation.offset,
 Two caveats apply when such a buffer is used by code outside of AdaptiveCpp:
 
 * The buffers are created with `VK_SHARING_MODE_EXCLUSIVE`. If the application
-  submits to a different queue family than the one AdaptiveCpp uses, it has to
-  perform queue family ownership transfers.
+  submits to a different queue family than the one AdaptiveCpp uses (available
+  as `queue_family_index` of the native queue handle), it has to perform queue
+  family ownership transfers.
 * AdaptiveCpp only makes its writes available up to its own barriers. The
   application needs to insert a buffer memory barrier with the appropriate
   stage and access masks after waiting for AdaptiveCpp's work, and before
@@ -296,6 +303,13 @@ wait_info.pValues = &handle.value;
 vkWaitSemaphores(handle.device, &wait_info, UINT64_MAX);
 ```
 
+A submission can only wait on the semaphore if it is made to a queue of
+`handle.device`, which an application can only do from inside a custom
+operation, see [Submitting to the native queue](#submitting-to-the-native-queue).
+As AdaptiveCpp does not enable synchronization2, such a submission has to use
+`vkQueueSubmit()` with a `VkTimelineSemaphoreSubmitInfo`, not
+`vkQueueSubmit2()`.
+
 The semaphore returned here is owned by AdaptiveCpp, and the **application must
 not signal values on it**: the runtime allocates the values of its own timeline,
 and signalling them from outside would satisfy its internal waits early. To make
@@ -317,6 +331,30 @@ q.submit([&](sycl::handler &cgh) {
   cgh.parallel_for(sycl::range<1>{1024}, [=](sycl::id<1> i) { data[i] *= 2; });
 });
 ```
+
+### Submitting to the native queue
+
+Inside a custom operation, the backend queue that the operation was scheduled to
+is available, so that the application can record and submit its own command
+buffers in order with the rest of the SYCL work:
+
+```c++
+q.submit([&](sycl::handler &cgh) {
+  cgh.AdaptiveCpp_enqueue_custom_operation([=](sycl::interop_handle &h) {
+    auto native_queue = h.get_native_queue<sycl::backend::vk>();
+    // Use native_queue.queue, native_queue.queue_family_index, native_queue.device
+  });
+});
+```
+
+The custom operation runs when the operation is submitted, not once the work it
+depends on has completed, so it must not wait for that work on the host.
+Instead, everything it submits to `native_queue.queue` before returning is
+ordered after the preceding operations and dependencies, and the operation, as
+well as the SYCL work depending on it, only completes once that work has
+completed. Work submitted to any other queue is not tracked by AdaptiveCpp.
+While the custom operation runs, AdaptiveCpp does not submit to the queue
+itself.
 
 ### Limitations
 

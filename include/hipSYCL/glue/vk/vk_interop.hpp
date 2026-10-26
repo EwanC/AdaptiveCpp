@@ -31,6 +31,7 @@
 #include "hipSYCL/runtime/backend.hpp"
 #include "hipSYCL/runtime/error.hpp"
 #include "hipSYCL/runtime/hardware.hpp"
+#include "hipSYCL/runtime/inorder_queue.hpp"
 #include "hipSYCL/runtime/operations.hpp"
 #include "hipSYCL/runtime/vk/vk_native_objects.hpp"
 
@@ -150,6 +151,7 @@ template <> struct backend_interop<sycl::backend::vk> {
   using native_platform_type = VkInstance;
   using native_device_type = VkPhysicalDevice;
   using native_context_type = VkDevice;
+  using native_queue_type = rt::vk_queue_native_handle;
   using native_event_type = rt::vk_event_native_handle;
   using native_allocation_type = rt::vk_allocation_native_handle;
 
@@ -209,6 +211,31 @@ template <> struct backend_interop<sycl::backend::vk> {
     }
 
     return handle.device;
+  }
+
+  static native_queue_type get_native_queue(void *launcher_params) {
+    const native_queue_type invalid_queue{VK_NULL_HANDLE, 0, VK_NULL_HANDLE};
+
+    if (!launcher_params) {
+      rt::register_error(
+          __acpp_here(),
+          rt::error_info{"get_native_queue: invalid (null) launcher params",
+                         rt::error_type::invalid_parameter_error});
+      return invalid_queue;
+    }
+
+    void *native_type =
+        static_cast<rt::inorder_queue *>(launcher_params)->get_native_type();
+    if (!native_type) {
+      rt::register_error(
+          __acpp_here(),
+          rt::error_info{
+              "get_native_queue: queue does not expose a native Vulkan queue",
+              rt::error_type::runtime_error});
+      return invalid_queue;
+    }
+
+    return *static_cast<native_queue_type *>(native_type);
   }
 
   static native_event_type get_native_event(const sycl::event &e) {
@@ -374,7 +401,8 @@ template <> struct backend_interop<sycl::backend::vk> {
   static constexpr bool can_extract_native_device = true;
   static constexpr bool can_extract_native_context = true;
   // sycl::get_native(queue) is not implemented, since AdaptiveCpp may use a
-  // different backend queue for each operation.
+  // different backend queue for each operation. Use
+  // interop_handle::get_native_queue() inside a custom operation instead.
   static constexpr bool can_extract_native_queue = false;
   static constexpr bool can_extract_native_event = true;
   static constexpr bool can_extract_native_buffer = false;

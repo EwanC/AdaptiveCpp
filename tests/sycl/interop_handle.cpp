@@ -32,4 +32,34 @@ BOOST_AUTO_TEST_CASE(interop_handle_api) {
   q.wait_and_throw();
 }
 
+#if defined(ACPP_EXT_VK_INTEROP)
+BOOST_AUTO_TEST_CASE(interop_handle_vk_native_queue) {
+  namespace s = sycl;
+
+  s::queue q;
+  if (q.get_device().get_backend() != s::backend::vk) {
+    BOOST_TEST_MESSAGE(
+        "Skipping interop_handle_vk_native_queue: not a Vulkan device");
+    return;
+  }
+
+  // The default context of a queue may contain several Vulkan devices, while
+  // a VkDevice can only be obtained from a context with a single one.
+  VkDevice context_device =
+      s::get_native<s::backend::vk>(s::context{q.get_device()});
+  BOOST_CHECK(context_device != VK_NULL_HANDLE);
+
+  q.submit([&](s::handler &cgh) {
+    cgh.AdaptiveCpp_enqueue_custom_operation([=](s::interop_handle &ih) {
+      BOOST_CHECK(ih.get_backend() == s::backend::vk);
+
+      auto native_queue = ih.get_native_queue<s::backend::vk>();
+      BOOST_CHECK(native_queue.queue != VK_NULL_HANDLE);
+      BOOST_CHECK(native_queue.device == context_device);
+    });
+  });
+  q.wait_and_throw();
+}
+#endif
+
 BOOST_AUTO_TEST_SUITE_END()

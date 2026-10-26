@@ -90,6 +90,10 @@ private:
   vk::CommandBuffer get_command_buffer();
 
   void submit_command_buffer(vk::CommandBuffer &cmd_buf);
+  // Submits a batch that waits on the previous timeline value and pending
+  // dependencies on other queues, executes cmd_buf unless it is null, and
+  // signals the next timeline value, which is returned.
+  uint64_t submit_batch(const vk::CommandBuffer *cmd_buf);
 
   vk_alloc_info *find_or_create_allocation(vk::DeviceAddress ptr,
                                            unsigned size);
@@ -108,6 +112,7 @@ private:
   vk_hardware_manager *_hw_manager;
   const std::size_t _device_index;
   vk_hardware_context *_dev_ctx;
+  vk_queue_native_handle _native_handle{};
 
   // Members for command submission
   uint32_t _cmd_buf_alloc_size =

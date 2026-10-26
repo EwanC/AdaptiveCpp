@@ -40,6 +40,15 @@ struct vk_device_native_handle {
   uint32_t queue_family_index;
 };
 
+// Native objects describing a queue of the Vulkan backend. Note that the
+// VkQueue is externally synchronized, and may only be used from within a
+// custom operation.
+struct vk_queue_native_handle {
+  VkQueue queue;
+  uint32_t queue_family_index;
+  VkDevice device;
+};
+
 // Describes a point in the execution of a Vulkan queue using a timeline
 // semaphore and the value it attains once the work has completed.
 struct vk_event_native_handle {

@@ -57,6 +57,9 @@ vk_queue::vk_queue(vk_hardware_manager *hw_manager, std::size_t device_index)
       static_cast<vk_hardware_context *>(hw_manager->get_device(device_index));
   auto &device = _dev_ctx->get_device();
 
+  _native_handle = vk_queue_native_handle{*_dev_ctx->get_queue(),
+                                          _dev_ctx->get_queue_index(), *device};
+
   _dev_has_khr_calibrated_timestamps = _dev_ctx->are_extensions_enabled(
       vk_device_extensions::khr_calibrated_timestamps);
 
@@ -513,12 +516,9 @@ vk::CommandBuffer vk_queue::get_command_buffer() {
 }
 
 void vk_queue::submit_command_buffer(vk::CommandBuffer &cmd_buf) {
-  // Set new timeline semaphore values
-  const uint64_t wait_value = _timeline_value;
-  const uint64_t signal_value = ++_timeline_value;
-
   if (_profiling) {
     // Only let a user read the timestamps after the signal semaphore has fired
+    const uint64_t signal_value = _timeline_value + 1;
     if (_profiling->start_time) {
       _profiling->start_time->set_semaphore_wait_val(signal_value);
     }
@@ -527,8 +527,19 @@ void vk_queue::submit_command_buffer(vk::CommandBuffer &cmd_buf) {
     }
   }
 
-  HIPSYCL_DEBUG_INFO << "vk_queue: submit command-buffer with "
-                     << "semaphore " << *_semaphore << " wait value "
+  const uint64_t signal_value = submit_batch(&cmd_buf);
+  // Track the command-buffer and signal val as executing
+  _executing_cmd_bufs.insert({signal_value, cmd_buf});
+}
+
+uint64_t vk_queue::submit_batch(const vk::CommandBuffer *cmd_buf) {
+  // Set new timeline semaphore values
+  const uint64_t wait_value = _timeline_value;
+  const uint64_t signal_value = ++_timeline_value;
+
+  HIPSYCL_DEBUG_INFO << "vk_queue: submit "
+                     << (cmd_buf ? "command-buffer" : "empty batch")
+                     << " with semaphore " << *_semaphore << " wait value "
                      << wait_value << " & signal value " << signal_value
                      << std::endl;
 
@@ -551,28 +562,47 @@ void vk_queue::submit_command_buffer(vk::CommandBuffer &cmd_buf) {
   std::vector<vk::PipelineStageFlags> wait_stages(
       num_wait_semaphores, vk::PipelineStageFlagBits::eAllCommands);
   vk::SubmitInfo submit_info(num_wait_semaphores, semaphores.data(),
-                             wait_stages.data(), 1, &cmd_buf, 1,
+                             wait_stages.data(), cmd_buf ? 1u : 0u, cmd_buf, 1,
                              semaphores.data());
   vk::StructureChain<vk::SubmitInfo, vk::TimelineSemaphoreSubmitInfo>
       submit_info_chain(submit_info, timeline_info);
 
   {
-    std::lock_guard<std::mutex> lock{_dev_ctx->get_queue_mutex()};
+    std::lock_guard<std::recursive_mutex> lock{_dev_ctx->get_queue_mutex()};
     _dev_ctx->get_queue().submit(submit_info_chain.get<vk::SubmitInfo>(),
                                  nullptr);
   }
-  // Track the command-buffer and signal val as executing
-  _executing_cmd_bufs.insert({signal_value, cmd_buf});
 
   // Wipe event deps from other queues as we have now respected these
   _wait_deps.clear();
+  return signal_value;
 }
 
 result vk_queue::submit_kernel(kernel_operation &op, const dag_node_ptr &node) {
   rt::backend_kernel_launch_capabilities cap;
   cap.provide_sscp_invoker(&_sscp_invoker);
   profile_if_enabled(op, node);
-  return op.get_launcher().invoke(backend_id::vk, this, cap, node.get());
+  if (!op.get_launcher().is_custom_operation()) {
+    return op.get_launcher().invoke(backend_id::vk, this, cap, node.get());
+  }
+
+  // Custom operations may submit their own work to the native queue, so
+  // prevent the other queues of the device from submitting to it meanwhile.
+  std::lock_guard<std::recursive_mutex> lock{_dev_ctx->get_queue_mutex()};
+
+  // The second synchronization scope of a semaphore wait operation includes
+  // all commands that occur later in submission order. Waiting for the
+  // preceding work and the dependencies of the operation therefore also
+  // orders everything the custom operation submits after them.
+  submit_batch(nullptr);
+
+  result res = op.get_launcher().invoke(backend_id::vk, this, cap, node.get());
+
+  // The first synchronization scope of a semaphore signal operation includes
+  // all commands that occur earlier in submission order, so the operation
+  // completes only once everything it has submitted has completed.
+  submit_batch(nullptr);
+  return res;
 }
 
 result vk_queue::submit_prefetch(prefetch_operation &op,
@@ -781,10 +811,7 @@ device_id vk_queue::get_device() const {
 }
 
 void *vk_queue::get_native_type() const {
-  assert(false && "not implemented");
-  HIPSYCL_DEBUG_WARNING << "vk_queue::get_native_type() not implemented"
-                        << std::endl;
-  return nullptr;
+  return const_cast<vk_queue_native_handle *>(&_native_handle);
 }
 
 result vk_queue::submit_sscp_kernel_from_code_object(
