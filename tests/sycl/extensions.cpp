@@ -1702,9 +1702,6 @@ BOOST_AUTO_TEST_CASE(get_native_vk_allocation) {
 }
 #endif // ACPP_EXT_GET_NATIVE_ALLOCATION
 
-#if defined(__unix__)
-#include <unistd.h>
-
 BOOST_AUTO_TEST_CASE(vk_external_memory) {
   namespace s = sycl;
 
@@ -1716,7 +1713,7 @@ BOOST_AUTO_TEST_CASE(vk_external_memory) {
 
   if (!s::vk_interop::has_external_memory_support(q.get_device())) {
     BOOST_TEST_MESSAGE("Skipping vk_external_memory: device does not support "
-                       "VK_KHR_external_memory_fd");
+                       "external memory handles");
     return;
   }
 
@@ -1729,13 +1726,13 @@ BOOST_AUTO_TEST_CASE(vk_external_memory) {
   q.fill(ptr, 1, n).wait();
 
   auto handle = s::vk_interop::export_memory(ptr + 1, q.get_context());
-  BOOST_CHECK(handle.fd >= 0);
+  BOOST_CHECK(handle.handle.is_valid());
+  BOOST_CHECK(handle.handle.type ==
+              s::vk_interop::native_external_handle_type);
   BOOST_CHECK(handle.allocation_size >= n * sizeof(int));
   BOOST_CHECK_EQUAL(handle.offset, sizeof(int));
   BOOST_CHECK_EQUAL(handle.size, (n - 1) * sizeof(int));
-  if (handle.fd >= 0) {
-    close(handle.fd);
-  }
+  s::vk_interop::close_external_handle(handle.handle);
 
   s::free(ptr, q);
 
@@ -1744,7 +1741,7 @@ BOOST_AUTO_TEST_CASE(vk_external_memory) {
   BOOST_REQUIRE(not_exportable != nullptr);
   auto invalid =
       s::vk_interop::export_memory(not_exportable, q.get_context());
-  BOOST_CHECK(invalid.fd < 0);
+  BOOST_CHECK(!invalid.handle.is_valid());
   s::free(not_exportable, q);
 }
 
@@ -1760,7 +1757,7 @@ BOOST_AUTO_TEST_CASE(vk_external_semaphore) {
 
   if (!s::vk_interop::has_external_semaphore_support(producer.get_device())) {
     BOOST_TEST_MESSAGE("Skipping vk_external_semaphore: device does not "
-                       "support VK_KHR_external_semaphore_fd");
+                       "support external semaphore handles");
     return;
   }
 
@@ -1777,12 +1774,18 @@ BOOST_AUTO_TEST_CASE(vk_external_semaphore) {
 
   s::event produced = producer.single_task([=]() { *value = 41; });
   auto exported = s::vk_interop::export_semaphore(produced, ctx);
-  BOOST_REQUIRE(exported.fd >= 0);
+  BOOST_REQUIRE(exported.handle.is_valid());
 
   // Importing the payload again gives a semaphore sharing the same timeline,
   // which an application driving its own VkDevice would do.
-  s::vk_interop::imported_semaphore semaphore{ctx, exported.fd};
+  s::vk_interop::imported_semaphore semaphore{ctx, exported.handle};
   BOOST_REQUIRE(static_cast<bool>(semaphore));
+  // Importing a file descriptor takes ownership of it, a Win32 handle on the
+  // other hand still has to be closed by us.
+  if (exported.handle.type ==
+      s::vk_interop::external_handle_type::opaque_win32) {
+    s::vk_interop::close_external_handle(exported.handle);
+  }
 
   s::event imported =
       s::vk_interop::make_event(semaphore, exported.value, ctx);
@@ -1800,7 +1803,6 @@ BOOST_AUTO_TEST_CASE(vk_external_semaphore) {
 
   s::free(value, producer);
 }
-#endif // __unix__
 #endif // ACPP_GLUE_VK_INTEROP_AVAILABLE
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -821,9 +821,9 @@ This extension allows a user to request a USM allocation that can be shared with
 This can be done by using the `AdaptiveCpp_exportable` property on USM allocation functions.
 Backends that cannot satisfy the request ignore the property.
 
-In the Vulkan backend the allocation is made exportable as an opaque file descriptor with
-`sycl::vk_interop::export_memory()`, which allows sharing it with a `VkDevice` that the application
-owns itself. See the [Vulkan backend documentation](install-vulkan.md#sharing-with-a-vkdevice-the-application-owns).
+In the Vulkan backend the allocation is made exportable as an opaque handle - a POSIX file
+descriptor, or an NT handle on Windows - with `sycl::vk_interop::export_memory()`, which allows
+sharing it with a `VkDevice` that the application owns itself. See the [Vulkan backend documentation](install-vulkan.md#sharing-with-a-vkdevice-the-application-owns).
 
 Example:
 ```

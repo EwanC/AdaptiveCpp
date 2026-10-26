@@ -81,14 +81,15 @@ vk_queue::vk_queue(vk_hardware_manager *hw_manager, std::size_t device_index)
   }
 
   // Create a timeline semaphore. If the device supports it, the semaphore is
-  // created such that it can be exported as an opaque file descriptor, so
+  // created such that it can be exported as an opaque external handle, so
   // that an application driving a VkDevice of its own can wait on the work
   // AdaptiveCpp submits.
   vk::StructureChain<vk::SemaphoreCreateInfo, vk::SemaphoreTypeCreateInfo,
                      vk::ExportSemaphoreCreateInfo>
       semaphore_info({}, {vk::SemaphoreType::eTimeline, _timeline_value},
-                     {vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd});
-  if (!_dev_ctx->has_external_semaphore_support()) {
+                     {vk_native_external_semaphore_handle_bit});
+  if (!_dev_ctx->has_external_semaphore_support(
+          vk_native_external_handle_type)) {
     semaphore_info.unlink<vk::ExportSemaphoreCreateInfo>();
   }
   _semaphore =

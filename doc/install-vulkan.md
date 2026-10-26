@@ -342,23 +342,43 @@ and deliberately picks the least capable compute queue family. An application
 that needs graphics, presentation, or any extension or feature the backend does
 not enable therefore has to keep its own `VkInstance`, `VkDevice` and queues.
 
-For this case the backend enables `VK_KHR_external_memory_fd` and
-`VK_KHR_external_semaphore_fd` where the device supports them, so that the two
-logical devices - which must be created from the same `VkPhysicalDevice` - can
-share memory and synchronization through opaque file descriptors. The API lives
-in `sycl::vk_interop`:
+For this case the backend enables the external memory and external semaphore
+extensions where the device supports them, so that the two logical devices -
+which must be created from the same `VkPhysicalDevice` - can share memory and
+synchronization through opaque handles. The extensions used depend on the
+platform: `VK_KHR_external_memory_fd` and `VK_KHR_external_semaphore_fd` with
+POSIX file descriptors everywhere except Windows, and
+`VK_KHR_external_memory_win32` and `VK_KHR_external_semaphore_win32` with NT
+handles on Windows. The API lives in `sycl::vk_interop`:
 
 | What                             | How                                                                 |
 | -------------------------------- | ------------------------------------------------------------------- |
+| Native handle type               | `sycl::vk_interop::native_external_handle_type`                      |
 | Query memory sharing support     | `sycl::vk_interop::has_external_memory_support(device)`              |
 | Query semaphore sharing support  | `sycl::vk_interop::has_external_semaphore_support(device)`           |
 | Export a USM allocation          | `sycl::vk_interop::export_memory(ptr, context)`                      |
 | Export the semaphore of an event | `sycl::vk_interop::export_semaphore(event, context)`                 |
-| Import a timeline semaphore      | `sycl::vk_interop::imported_semaphore{context, fd}`                  |
+| Import a timeline semaphore      | `sycl::vk_interop::imported_semaphore{context, handle}`              |
 | Event for an imported timeline   | `sycl::vk_interop::make_event(imported_semaphore, value, context)`   |
+| Release an exported handle       | `sycl::vk_interop::close_external_handle(handle)`                    |
 
-All exported file descriptors are owned by the caller: importing one transfers
-ownership to Vulkan, otherwise it has to be released with `close()`.
+The query and export entry points take an optional
+`sycl::vk_interop::external_handle_type` which defaults to
+`native_external_handle_type`; no Vulkan implementation supports both handle
+types, so there is usually no reason to pass anything else.
+
+Exported handles are described by `sycl::vk_interop::external_handle`, which
+carries the handle `type` and either an `fd` or a `win32_handle`, and reports
+whether the export succeeded through `is_valid()`. Ownership follows the rules
+of the underlying extensions and differs between the two:
+
+* a file descriptor is owned by the caller until it is imported; the import
+  takes ownership of it, so it must only be closed if it was *not* imported,
+* an NT handle is always owned by the caller, also after a successful import,
+  and must therefore always be closed.
+
+`close_external_handle()` releases a handle of either type with `close()` or
+`CloseHandle()` respectively.
 
 #### Sharing memory
 
@@ -377,15 +397,22 @@ float *data = sycl::malloc_device<float>(
     {sycl::property::usm::AdaptiveCpp_exportable{}});
 
 auto mem = sycl::vk_interop::export_memory(data, q.get_context());
-// mem.fd is an opaque file descriptor of the VkDeviceMemory backing the
-// allocation, mem.allocation_size its size, mem.memory_type_index the memory
-// type it was allocated from, and mem.offset / mem.size describe the queried
-// pointer within it.
+// mem.handle is an opaque handle of the VkDeviceMemory backing the allocation,
+// mem.allocation_size its size, mem.memory_type_index the memory type it was
+// allocated from, and mem.offset / mem.size describe the queried pointer
+// within it.
 
+#ifdef _WIN32
+VkImportMemoryWin32HandleInfoKHR import_info{};
+import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+import_info.handle = mem.handle.win32_handle; // still owned by us
+#else
 VkImportMemoryFdInfoKHR import_info{};
 import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
 import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-import_info.fd = mem.fd; // Vulkan takes ownership of the fd on success
+import_info.fd = mem.handle.fd; // Vulkan takes ownership of the fd on success
+#endif
 
 VkMemoryAllocateInfo alloc_info{};
 alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -395,10 +422,13 @@ alloc_info.memoryTypeIndex = mem.memory_type_index;
 // vkAllocateMemory() on the application's own VkDevice, then create a VkBuffer
 // with the usage the application needs (e.g. vertex or storage buffer) and
 // bind it to the imported memory at offset 0.
+
+// On Windows the NT handle stays ours and has to be released afterwards:
+// sycl::vk_interop::close_external_handle(mem.handle);
 ```
 
 Each exportable allocation owns its entire `VkDeviceMemory`, so importing the
-file descriptor gives access to exactly that allocation. The importing device
+handle gives access to exactly that allocation. The importing device
 must be created from the same `VkPhysicalDevice`, since `memory_type_index` is
 only meaningful there. The application is responsible for creating its buffer
 with memory requirements that the imported memory satisfies, and - because the
@@ -408,18 +438,19 @@ ownership transfers between the two devices.
 #### Sharing synchronization
 
 Events of the Vulkan backend are backed by timeline semaphores, which are
-created exportable when the device supports `VK_KHR_external_semaphore_fd`. The
-application imports the payload into its own device to wait for SYCL work:
+created exportable when the device supports the external semaphore extension.
+The application imports the payload into its own device to wait for SYCL work:
 
 ```c++
 sycl::event e = q.parallel_for(sycl::range<1>{1024},
                                [=](sycl::id<1> i) { data[i] = i[0]; });
 
 auto sem = sycl::vk_interop::export_semaphore(e, q.get_context());
-// sem.fd refers to the timeline semaphore payload, sem.value is the value it
-// attains once the operation has completed. Import it with
-// VkImportSemaphoreFdInfoKHR into a timeline semaphore of the application's
-// device and wait for sem.value there.
+// sem.handle refers to the timeline semaphore payload, sem.value is the value
+// it attains once the operation has completed. Import it with
+// VkImportSemaphoreFdInfoKHR (or VkImportSemaphoreWin32HandleInfoKHR on
+// Windows) into a timeline semaphore of the application's device and wait for
+// sem.value there.
 ```
 
 As with the semaphore handed out by `sycl::get_native<sycl::backend::vk>(event)`,
@@ -429,8 +460,12 @@ export a timeline semaphore of the application instead and import it into the
 SYCL context:
 
 ```c++
-// vkGetSemaphoreFdKHR() on the application's own timeline semaphore ...
-sycl::vk_interop::imported_semaphore semaphore{q.get_context(), app_fd};
+// vkGetSemaphoreFdKHR() / vkGetSemaphoreWin32HandleKHR() on the application's
+// own timeline semaphore ...
+auto app_handle = sycl::vk_interop::external_handle::from_fd(app_fd);
+sycl::vk_interop::imported_semaphore semaphore{q.get_context(), app_handle};
+// With an NT handle, use from_win32_handle() instead and release the handle
+// with close_external_handle() once the import has returned.
 
 // vkQueueSubmit2() signalling app_value on the application's semaphore ...
 sycl::event wait_for_app =
@@ -458,9 +493,11 @@ waits on.
 The interop API exposes the objects that AdaptiveCpp creates itself; it cannot
 adopt a `VkInstance` or `VkDevice` created by the application. Sharing with an
 application that drives its own Vulkan device is done with the external memory
-and semaphore file descriptors described above, which requires a Vulkan
-implementation supporting `VK_KHR_external_memory_fd` and
-`VK_KHR_external_semaphore_fd`, and therefore does not work with MoltenVK.
+and semaphore handles described above, which requires a Vulkan implementation
+supporting `VK_KHR_external_memory_{fd,win32}` and
+`VK_KHR_external_semaphore_{fd,win32}`, and therefore does not work with
+MoltenVK. Only the handle type native to the platform AdaptiveCpp was built
+for is available.
 There is no interop for `sycl::buffer`, images or samplers.
 
 ## Benchmarks

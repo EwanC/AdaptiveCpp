@@ -53,8 +53,29 @@ enum extension_bits : uint16_t {
   ext_calibrated_timestamps = 1 << 2,
   khr_external_memory_fd = 1 << 3,
   khr_external_semaphore_fd = 1 << 4,
+  khr_external_memory_win32 = 1 << 5,
+  khr_external_semaphore_win32 = 1 << 6,
 };
 } // namespace vk_device_extensions
+
+// The Vulkan handle type bits matching vk_native_external_handle_type. Objects
+// the runtime creates as exportable use these, as no implementation supports
+// both opaque file descriptors and Win32 handles.
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+inline constexpr vk::ExternalMemoryHandleTypeFlagBits
+    vk_native_external_memory_handle_bit =
+        vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+inline constexpr vk::ExternalSemaphoreHandleTypeFlagBits
+    vk_native_external_semaphore_handle_bit =
+        vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueWin32;
+#else
+inline constexpr vk::ExternalMemoryHandleTypeFlagBits
+    vk_native_external_memory_handle_bit =
+        vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd;
+inline constexpr vk::ExternalSemaphoreHandleTypeFlagBits
+    vk_native_external_semaphore_handle_bit =
+        vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd;
+#endif
 
 class vk_hardware_context : public hardware_context,
                             public vk_native_device_provider,
@@ -91,13 +112,43 @@ public:
 
   vk_device_native_handle get_native_device_handle() const override;
 
-  bool has_external_semaphore_support() const override;
-  bool export_semaphore_fd(VkSemaphore semaphore, int &out_fd) const override;
-  VkSemaphore import_timeline_semaphore_fd(int fd) override;
+  bool
+  has_external_semaphore_support(vk_external_handle_type type) const override;
+  bool export_semaphore_handle(VkSemaphore semaphore,
+                               vk_external_handle_type type,
+                               vk_external_handle &out) const override;
+  VkSemaphore
+  import_timeline_semaphore(const vk_external_handle &handle) override;
   void destroy_imported_semaphore(VkSemaphore semaphore) override;
 
-  bool has_external_memory_support() const {
-    return are_extensions_enabled(vk_device_extensions::khr_external_memory_fd);
+  bool has_external_memory_support(vk_external_handle_type type) const {
+    const uint16_t bit = external_memory_extension_bit(type);
+    return bit != 0 && are_extensions_enabled(bit);
+  }
+
+  // Extension bit providing the given external memory handle type, or 0 if
+  // the handle type is not supported by this platform at all.
+  static uint16_t external_memory_extension_bit(vk_external_handle_type type) {
+    if (type == vk_external_handle_type::opaque_fd)
+      return vk_device_extensions::khr_external_memory_fd;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (type == vk_external_handle_type::opaque_win32)
+      return vk_device_extensions::khr_external_memory_win32;
+#endif
+    return 0;
+  }
+
+  // Extension bit providing the given external semaphore handle type, or 0 if
+  // the handle type is not supported by this platform at all.
+  static uint16_t
+  external_semaphore_extension_bit(vk_external_handle_type type) {
+    if (type == vk_external_handle_type::opaque_fd)
+      return vk_device_extensions::khr_external_semaphore_fd;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (type == vk_external_handle_type::opaque_win32)
+      return vk_device_extensions::khr_external_semaphore_win32;
+#endif
+    return 0;
   }
 
   const vk::raii::Device &get_device() const { return _device; }

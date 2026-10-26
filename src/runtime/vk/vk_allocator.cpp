@@ -137,10 +137,11 @@ vk_allocator::create_device_address_buffer(vk::DeviceSize size,
       vk::BufferUsageFlagBits::eTransferDst |
       vk::BufferUsageFlagBits::eShaderDeviceAddress;
 
-  if (exportable && !has_external_memory_support()) {
+  if (exportable &&
+      !has_external_memory_support(vk_native_external_handle_type)) {
     throw sycl::exception{
         sycl::make_error_code(sycl::errc::feature_not_supported),
-        "Vulkan device does not support VK_KHR_external_memory_fd"};
+        "Vulkan device does not support external memory handles"};
   }
 
   // This function allocates a device USM pointer, so make an effort to
@@ -159,7 +160,7 @@ vk_allocator::create_device_address_buffer(vk::DeviceSize size,
 
   // Buffers bound to memory that may be exported have to be created as such
   vk::ExternalMemoryBufferCreateInfo external_buffer_info{
-      vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd};
+      vk_native_external_memory_handle_bit};
   if (exportable) {
     buffer_info.pNext = &external_buffer_info;
   }
@@ -193,7 +194,8 @@ vk_allocator::create_device_address_buffer(vk::DeviceSize size,
   VkExportMemoryAllocateInfo export_info{};
   if (exportable) {
     export_info.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-    export_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    export_info.handleTypes = static_cast<VkExternalMemoryHandleTypeFlags>(
+        vk_native_external_memory_handle_bit);
     export_info.pNext = flags_info.pNext;
     flags_info.pNext = &export_info;
   }
@@ -251,16 +253,18 @@ bool vk_allocator::get_native_allocation(
   return false;
 }
 
-bool vk_allocator::has_external_memory_support() const {
-  return _hw_ctx->has_external_memory_support();
+bool vk_allocator::has_external_memory_support(
+    vk_external_handle_type type) const {
+  return _hw_ctx->has_external_memory_support(type);
 }
 
-bool vk_allocator::export_allocation_fd(
-    const void *ptr, vk_external_memory_native_handle &out) const {
-  if (!has_external_memory_support()) {
+bool vk_allocator::export_allocation_handle(
+    const void *ptr, vk_external_handle_type type,
+    vk_external_memory_native_handle &out) const {
+  if (!has_external_memory_support(type)) {
     print_error(__acpp_here(),
-                error_info{"vk_allocator: VK_KHR_external_memory_fd is not "
-                           "supported by this device"});
+                error_info{"vk_allocator: the requested external memory "
+                           "handle type is not supported by this device"});
     return false;
   }
 
@@ -284,15 +288,32 @@ bool vk_allocator::export_allocation_fd(
     }
 
     try {
-      vk::MemoryGetFdInfoKHR get_fd_info{
-          *alloc_info._dev_mem,
-          vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd};
-      out.fd = _hw_ctx->get_device().getMemoryFdKHR(get_fd_info);
+      if (type == vk_external_handle_type::opaque_fd) {
+        vk::MemoryGetFdInfoKHR get_fd_info{
+            *alloc_info._dev_mem,
+            vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd};
+        out.handle = vk_external_handle::from_fd(
+            _hw_ctx->get_device().getMemoryFdKHR(get_fd_info));
+      } else {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+        vk::MemoryGetWin32HandleInfoKHR get_handle_info{
+            *alloc_info._dev_mem,
+            vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32};
+        out.handle = vk_external_handle::from_win32_handle(
+            _hw_ctx->get_device().getMemoryWin32HandleKHR(get_handle_info));
+#else
+        return false;
+#endif
+      }
     } catch (const std::exception &e) {
       print_error(__acpp_here(),
                   error_info{std::string("vk_allocator: could not export "
-                                         "memory file descriptor - ")
+                                         "memory handle - ")
                                  .append(e.what())});
+      return false;
+    }
+
+    if (!out.handle.is_valid()) {
       return false;
     }
 

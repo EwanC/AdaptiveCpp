@@ -68,17 +68,82 @@ struct vk_allocation_native_handle {
   VkDeviceSize size;
 };
 
-// Describes a USM allocation that has been exported as an opaque POSIX file
-// descriptor, so that it can be imported into a VkDevice that AdaptiveCpp does
-// not own. The importing application creates its own VkBuffer, allocates
-// memory of allocation_size bytes from memory_type_index while chaining a
-// VkImportMemoryFdInfoKHR referring to fd, and binds the buffer to it.
+// The kind of operating system handle used to share a VkDeviceMemory or a
+// VkSemaphore payload between two Vulkan devices.
+enum class vk_external_handle_type {
+  none = 0,
+  // A POSIX file descriptor, corresponding to
+  // VK_EXTERNAL_{MEMORY,SEMAPHORE}_HANDLE_TYPE_OPAQUE_FD_BIT.
+  opaque_fd = 1,
+  // A Windows NT handle, corresponding to
+  // VK_EXTERNAL_{MEMORY,SEMAPHORE}_HANDLE_TYPE_OPAQUE_WIN32_BIT.
+  opaque_win32 = 2
+};
+
+// The handle type that is natively supported by the platform AdaptiveCpp has
+// been built for. There is no implementation that supports both, so this is
+// the handle type that applications will want to use.
+#ifdef _WIN32
+inline constexpr vk_external_handle_type vk_native_external_handle_type =
+    vk_external_handle_type::opaque_win32;
+#else
+inline constexpr vk_external_handle_type vk_native_external_handle_type =
+    vk_external_handle_type::opaque_fd;
+#endif
+
+// An operating system handle referring to a VkDeviceMemory or a VkSemaphore
+// payload. Only the member matching `type` is meaningful.
+//
+// Ownership rules follow those of the underlying Vulkan extensions and differ
+// between the two handle types:
+//  * opaque_fd: exporting transfers ownership of the file descriptor to the
+//    caller; importing transfers ownership to the Vulkan implementation. The
+//    file descriptor must be close()d if it is not imported.
+//  * opaque_win32: exporting creates a new NT handle owned by the caller;
+//    importing does *not* transfer ownership. The handle must always be
+//    released with CloseHandle(), also after a successful import.
+struct vk_external_handle {
+  vk_external_handle_type type = vk_external_handle_type::none;
+  // Valid if type == opaque_fd
+  int fd = -1;
+  // Valid if type == opaque_win32. This is a Windows HANDLE; it is typed as
+  // void* so that this header remains usable without <windows.h>.
+  void *win32_handle = nullptr;
+
+  bool is_valid() const {
+    if (type == vk_external_handle_type::opaque_fd)
+      return fd >= 0;
+    if (type == vk_external_handle_type::opaque_win32)
+      return win32_handle != nullptr;
+    return false;
+  }
+
+  static vk_external_handle from_fd(int fd) {
+    vk_external_handle h;
+    h.type = vk_external_handle_type::opaque_fd;
+    h.fd = fd;
+    return h;
+  }
+
+  static vk_external_handle from_win32_handle(void *handle) {
+    vk_external_handle h;
+    h.type = vk_external_handle_type::opaque_win32;
+    h.win32_handle = handle;
+    return h;
+  }
+};
+
+// Describes a USM allocation that has been exported as an opaque external
+// handle, so that it can be imported into a VkDevice that AdaptiveCpp does not
+// own. The importing application creates its own VkBuffer, allocates memory of
+// allocation_size bytes from memory_type_index while chaining a
+// VkImportMemoryFdInfoKHR or VkImportMemoryWin32HandleInfoKHR referring to the
+// handle, and binds the buffer to it.
 struct vk_external_memory_native_handle {
-  // Opaque file descriptor of the VkDeviceMemory backing the allocation.
-  // Ownership is transferred to the caller, which must either import it (the
-  // import takes ownership on success) or close() it.
-  int fd;
-  // Size of the VkDeviceMemory the file descriptor refers to
+  // Handle referring to the VkDeviceMemory backing the allocation. See
+  // vk_external_handle for the ownership rules.
+  vk_external_handle handle;
+  // Size of the VkDeviceMemory the handle refers to
   VkDeviceSize allocation_size;
   // Index of the memory type the allocation was made from. Only meaningful on
   // the same VkPhysicalDevice.
@@ -89,13 +154,12 @@ struct vk_external_memory_native_handle {
   VkDeviceSize size;
 };
 
-// Describes a timeline semaphore that has been exported as an opaque POSIX
-// file descriptor, together with the timeline value of interest.
+// Describes a timeline semaphore that has been exported as an opaque external
+// handle, together with the timeline value of interest.
 struct vk_external_semaphore_native_handle {
-  // Opaque file descriptor referring to the semaphore payload. Ownership is
-  // transferred to the caller, which must either import it (the import takes
-  // ownership on success) or close() it.
-  int fd;
+  // Handle referring to the semaphore payload. See vk_external_handle for the
+  // ownership rules.
+  vk_external_handle handle;
   // Value the imported timeline attains once the work has completed
   uint64_t value;
 };
@@ -112,20 +176,24 @@ public:
 // synchronizing with an application that drives a VkDevice of its own.
 class vk_native_external_semaphore_provider {
 public:
-  // Whether VK_KHR_external_semaphore_fd could be enabled on the device
-  virtual bool has_external_semaphore_support() const = 0;
+  // Whether the external semaphore extension providing the given handle type
+  // could be enabled on the device
+  virtual bool
+  has_external_semaphore_support(vk_external_handle_type type) const = 0;
 
   // Exports the given semaphore, which must belong to this device, as an
-  // opaque file descriptor. Returns false on failure.
-  virtual bool export_semaphore_fd(VkSemaphore semaphore,
-                                   int &out_fd) const = 0;
+  // opaque handle of the requested type. Returns false on failure.
+  virtual bool export_semaphore_handle(VkSemaphore semaphore,
+                                       vk_external_handle_type type,
+                                       vk_external_handle &out) const = 0;
 
   // Creates a semaphore on this device whose payload is imported from an
-  // opaque file descriptor of a timeline semaphore. On success, ownership of
-  // the file descriptor is transferred to the Vulkan implementation. Returns
-  // VK_NULL_HANDLE on failure. The returned semaphore is owned by the runtime
-  // and must be released with destroy_imported_semaphore().
-  virtual VkSemaphore import_timeline_semaphore_fd(int fd) = 0;
+  // opaque handle of a timeline semaphore. Ownership of the handle follows the
+  // rules described on vk_external_handle. Returns VK_NULL_HANDLE on failure.
+  // The returned semaphore is owned by the runtime and must be released with
+  // destroy_imported_semaphore().
+  virtual VkSemaphore
+  import_timeline_semaphore(const vk_external_handle &handle) = 0;
 
   virtual void destroy_imported_semaphore(VkSemaphore semaphore) = 0;
 
@@ -135,15 +203,17 @@ public:
 // Implemented by vk_allocator
 class vk_native_external_memory_provider {
 public:
-  // Whether VK_KHR_external_memory_fd could be enabled on the device
-  virtual bool has_external_memory_support() const = 0;
-
-  // Exports the allocation that ptr belongs to as an opaque file descriptor.
-  // Returns false if ptr does not belong to an exportable allocation of this
-  // allocator, or if the export failed.
+  // Whether the external memory extension providing the given handle type
+  // could be enabled on the device
   virtual bool
-  export_allocation_fd(const void *ptr,
-                       vk_external_memory_native_handle &out) const = 0;
+  has_external_memory_support(vk_external_handle_type type) const = 0;
+
+  // Exports the allocation that ptr belongs to as an opaque handle of the
+  // requested type. Returns false if ptr does not belong to an exportable
+  // allocation of this allocator, or if the export failed.
+  virtual bool
+  export_allocation_handle(const void *ptr, vk_external_handle_type type,
+                           vk_external_memory_native_handle &out) const = 0;
 
   virtual ~vk_native_external_memory_provider() {}
 };

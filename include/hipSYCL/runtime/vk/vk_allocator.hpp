@@ -39,7 +39,7 @@ struct vk_alloc_info {
   vk::DeviceSize _allocation_size = 0;
   // Index of the memory type _dev_mem was allocated from
   uint32_t _memory_type_index = UINT32_MAX;
-  // Whether _dev_mem can be exported as an opaque file descriptor
+  // Whether _dev_mem can be exported as an opaque external handle
   bool _exportable = false;
 };
 
@@ -87,18 +87,20 @@ public:
   bool get_native_allocation(const void *ptr,
                              vk_allocation_native_handle &out) const override;
 
-  bool has_external_memory_support() const override;
+  bool
+  has_external_memory_support(vk_external_handle_type type) const override;
 
   bool
-  export_allocation_fd(const void *ptr,
-                       vk_external_memory_native_handle &out) const override;
+  export_allocation_handle(const void *ptr, vk_external_handle_type type,
+                           vk_external_memory_native_handle &out) const override;
 
   vk_alloc_info *staging_allocate(size_t size_bytes);
 
   // Creates a single buffer backed by allocated device memory, and created with
   // properties which allow its device address returned. If exportable is set,
   // the memory is additionally created such that it can be shared with another
-  // Vulkan device through an opaque file descriptor.
+  // Vulkan device through an opaque handle of the platform's native external
+  // handle type.
   vk_buffer_allocation create_device_address_buffer(vk::DeviceSize size,
                                                     bool exportable = false);
 
