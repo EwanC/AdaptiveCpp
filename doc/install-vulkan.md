@@ -354,7 +354,9 @@ ordered after the preceding operations and dependencies, and the operation, as
 well as the SYCL work depending on it, only completes once that work has
 completed. Work submitted to any other queue is not tracked by AdaptiveCpp.
 While the custom operation runs, AdaptiveCpp does not submit to the queue
-itself.
+itself. When profiling, the start and end timestamps of a custom operation
+report the host time before and after it was invoked, as the work it submits
+is not measured on the GPU.
 
 ### Limitations
 

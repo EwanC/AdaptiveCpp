@@ -596,12 +596,38 @@ result vk_queue::submit_kernel(kernel_operation &op, const dag_node_ptr &node) {
   // orders everything the custom operation submits after them.
   submit_batch(nullptr);
 
+  // Operations are timed on the device through timestamp queries, which the
+  // runtime writes at the start and end of the command buffers it records.
+  // The work of a custom operation is recorded by the application though, so
+  // these queries would never be written, and reading them would block
+  // forever. Like the Metal backend, report host timestamps instead, taken
+  // before and after the custom operation is invoked. These do not measure the
+  // execution of the work the custom operation submits.
+  if (_profiling && _profiling->start_time) {
+    _profiling->start_time->take_host_timestamp();
+  }
+
   result res = op.get_launcher().invoke(backend_id::vk, this, cap, node.get());
+
+  if (_profiling && _profiling->finish_time) {
+    _profiling->finish_time->take_host_timestamp();
+  }
 
   // The first synchronization scope of a semaphore signal operation includes
   // all commands that occur earlier in submission order, so the operation
   // completes only once everything it has submitted has completed.
-  submit_batch(nullptr);
+  const uint64_t completion_value = submit_batch(nullptr);
+
+  if (_profiling) {
+    // As for other operations, only let a user read the timestamps once the
+    // operation has completed
+    if (_profiling->start_time) {
+      _profiling->start_time->set_semaphore_wait_val(completion_value);
+    }
+    if (_profiling->finish_time) {
+      _profiling->finish_time->set_semaphore_wait_val(completion_value);
+    }
+  }
   return res;
 }
 

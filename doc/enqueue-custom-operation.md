@@ -52,7 +52,7 @@ On the Metal backend, `h.get_native_queue<sycl::backend::metal>()` returns an `M
 
 Likewise on the Vulkan backend, `h.get_native_queue<sycl::backend::vk>()` returns a handle containing the `VkQueue`, its queue family index and the `VkDevice`. Work that the custom operation submits to that `VkQueue` is ordered with the other operations of the SYCL queue. `get_native_mem()` returns the USM pointer. Use `sycl::get_native_allocation<sycl::backend::vk>()` to get the underlying `VkBuffer` and the pointer's offset within it. See the [Vulkan interop documentation](install-vulkan.md#interoperability-with-vulkan).
 
-Profiling information for custom operations is currently not measured on the Metal GPU: the submission, start and end timestamps all report the host time at which the operation was submitted.
+Profiling information for custom operations is currently not measured on the Metal GPU: the submission, start and end timestamps all report the host time at which the operation was submitted. Similarly on the Vulkan backend, the work a custom operation submits is not measured on the GPU: the start and end timestamps report the host time before and after the custom operation was invoked.
 
 ```c++
 sycl::queue q;

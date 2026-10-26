@@ -238,5 +238,34 @@ BOOST_AUTO_TEST_CASE(queue_profiling_update_host_supported)
   }
 }
 
+#ifdef ACPP_EXT_ENQUEUE_CUSTOM_OPERATION
+// The Vulkan backend reports host timestamps for custom operations, as it
+// cannot measure the work they submit on the device.
+BOOST_AUTO_TEST_CASE(queue_profiling_vk_custom_operation)
+{
+  if(default_device_supports_profiling()) {
+    sycl::queue queue{sycl::property::queue::enable_profiling{}};
+    if(queue.get_device().get_backend() != sycl::backend::vk) {
+      BOOST_TEST_MESSAGE("Skipping queue_profiling_vk_custom_operation: not a "
+                         "Vulkan device");
+      return;
+    }
+
+    auto evt = queue.submit([&](sycl::handler &cgh) {
+      cgh.AdaptiveCpp_enqueue_custom_operation([=](sycl::interop_handle &) {});
+    });
+
+    auto submit =
+        evt.get_profiling_info<sycl::info::event_profiling::command_submit>();
+    auto start =
+        evt.get_profiling_info<sycl::info::event_profiling::command_start>();
+    auto end =
+        evt.get_profiling_info<sycl::info::event_profiling::command_end>();
+    BOOST_CHECK(submit <= start);
+    BOOST_CHECK(start <= end);
+  }
+}
+#endif
+
 
 BOOST_AUTO_TEST_SUITE_END() // NOTE: Make sure not to add anything below this line
