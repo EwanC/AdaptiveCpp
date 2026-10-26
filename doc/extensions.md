@@ -816,6 +816,36 @@ Example:
 
 ```
 
+### `ACPP_EXT_EXPORTABLE_ALLOCATION_PROPERTY`
+This extension allows a user to request a device USM allocation that can be shared with another API or
+device, by using the `sycl::property::usm::AdaptiveCpp_exportable` property on USM device allocation functions.
+It also adds the `sycl::aspect::AdaptiveCpp_exportable_device_allocations` device aspect, which indicates
+whether a device supports such allocations.
+
+This extension does not need to be enabled explicitly and is always available. However, support depends on
+the device and its backend, so applications should check the aspect before requesting an exportable allocation.
+Requesting one for a device that does not have `sycl::aspect::AdaptiveCpp_exportable_device_allocations`
+throws a `sycl::exception` with `sycl::errc::feature_not_supported`. The same exception is thrown when the
+property is passed to host or shared USM allocation functions, as only device allocations can be exportable.
+
+Example:
+```cpp
+sycl::queue q;
+sycl::device dev = q.get_device();
+
+if(dev.has(sycl::aspect::AdaptiveCpp_exportable_device_allocations)) {
+  int *p = sycl::malloc_device<int>(
+      n, dev, q.get_context(),
+      sycl::property_list{sycl::property::usm::AdaptiveCpp_exportable{}});
+
+  // Export p through the interop API of the device's backend
+
+  sycl::free(p, q);
+}
+```
+
+Currently not implemented by any backend.
+
 ### `ACPP_EXT_DEVICE_FREE_MEMORY`
 
 Adds a device aspect and device information descriptor for querying the backend-reported amount of free device memory.

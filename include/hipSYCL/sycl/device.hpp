@@ -129,6 +129,9 @@ public:
     } else if(asp == aspect::AdaptiveCpp_free_memory) {
       return get_rt_device()->has(
           rt::device_support_aspect::free_memory);
+    } else if(asp == aspect::AdaptiveCpp_exportable_device_allocations) {
+      return get_rt_device()->has(
+          rt::device_support_aspect::exportable_device_allocations);
     }
 
     return false;
@@ -743,7 +746,8 @@ HIPSYCL_SPECIALIZE_GET_INFO(device, aspects)
                         aspect::usm_shared_allocations,
                         aspect::usm_atomic_shared_allocations,
                         aspect::usm_system_allocations,
-                        aspect::AdaptiveCpp_free_memory};
+                        aspect::AdaptiveCpp_free_memory,
+                        aspect::AdaptiveCpp_exportable_device_allocations};
 
   std::vector<aspect> result;
 

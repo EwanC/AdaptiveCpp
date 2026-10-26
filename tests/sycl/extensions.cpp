@@ -1475,6 +1475,33 @@ BOOST_AUTO_TEST_CASE(device_free_memory)
   }
 }
 #endif
+#if defined(ACPP_EXT_EXPORTABLE_ALLOCATION_PROPERTY)
+BOOST_AUTO_TEST_CASE(exportable_allocation_property)
+{
+  sycl::queue q;
+  sycl::device dev = q.get_device();
+  const sycl::property_list props{
+      sycl::property::usm::AdaptiveCpp_exportable{}};
+  const auto is_feature_not_supported = [](const sycl::exception &e) {
+    return e.code() == sycl::errc::feature_not_supported;
+  };
+
+  if(dev.has(sycl::aspect::AdaptiveCpp_exportable_device_allocations)) {
+    int *ptr = sycl::malloc_device<int>(16, q, props);
+    BOOST_CHECK(ptr != nullptr);
+    sycl::free(ptr, q);
+  } else {
+    BOOST_CHECK_EXCEPTION(sycl::malloc_device<int>(16, q, props),
+                          sycl::exception, is_feature_not_supported);
+  }
+
+  // Only device allocations can be exportable
+  BOOST_CHECK_EXCEPTION(sycl::malloc_host<int>(16, q, props),
+                        sycl::exception, is_feature_not_supported);
+  BOOST_CHECK_EXCEPTION(sycl::malloc_shared<int>(16, q, props),
+                        sycl::exception, is_feature_not_supported);
+}
+#endif
 #if defined(__APPLE__) && defined(SYCL_EXT_ACPP_BACKEND_METAL)
 BOOST_AUTO_TEST_CASE(get_native_metal_event) {
   namespace s = sycl;

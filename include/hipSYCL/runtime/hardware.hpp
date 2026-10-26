@@ -40,6 +40,7 @@ enum class device_support_aspect {
   fp64,
   atomic64,
   free_memory,
+  exportable_device_allocations,
 };
 
 enum class device_uint_property {

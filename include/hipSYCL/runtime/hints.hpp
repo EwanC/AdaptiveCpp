@@ -223,6 +223,11 @@ HIPSYCL_RT_HINTS_MAP_GETTER(instant_execution,
 
 struct allocation_hints {
   std::optional<const std::vector<size_t>> AdaptiveCpp_target_numa_node;
+  // Request a device allocation that can be shared with other APIs or devices,
+  // e.g. by exporting it as an opaque file descriptor. Only devices with
+  // device_support_aspect::exportable_device_allocations can satisfy the
+  // request, which the SYCL USM functions check before passing it on.
+  std::optional<bool> AdaptiveCpp_exportable;
 };
 
 }

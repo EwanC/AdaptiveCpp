@@ -49,6 +49,15 @@ private:
   const std::vector<size_t> _numa_nodes;
 };
 
+// Request a device allocation that can be shared with other APIs or devices.
+// The device has to have aspect::AdaptiveCpp_exportable_device_allocations,
+// otherwise the allocation functions throw an exception with
+// errc::feature_not_supported, as they also do for host and shared
+// allocations.
+class AdaptiveCpp_exportable : public detail::usm_property
+{
+};
+
 }
 
 namespace {
@@ -65,7 +74,29 @@ namespace {
 
     }// AdaptiveCpp_target_numa_node
 
+    if(propList.has_property<property::usm::AdaptiveCpp_exportable>()) {
+        hints.AdaptiveCpp_exportable.emplace(true);
+    }// AdaptiveCpp_exportable
+
     return hints;
+  }
+
+  void verify_exportable_device_allocation(const device &dev,
+                                           const property_list &propList) {
+    if(propList.has_property<property::usm::AdaptiveCpp_exportable>() &&
+       !dev.has(aspect::AdaptiveCpp_exportable_device_allocations)) {
+      throw exception{make_error_code(errc::feature_not_supported),
+                      "AdaptiveCpp_exportable: the device does not support "
+                      "exportable allocations"};
+    }
+  }
+
+  void verify_not_exportable(const property_list &propList) {
+    if(propList.has_property<property::usm::AdaptiveCpp_exportable>()) {
+      throw exception{make_error_code(errc::feature_not_supported),
+                      "AdaptiveCpp_exportable: only device allocations can be "
+                      "exportable"};
+    }
   }
 } //namespace
 
@@ -74,6 +105,7 @@ namespace {
 inline void *malloc_device(size_t num_bytes, const device &dev,
                            const context &ctx,
                            const property_list &propList = {}) {
+  verify_exportable_device_allocation(dev, propList);
   if (num_bytes == 0)
     return nullptr;
   rt::allocation_hints hints = create_hints_from_proplist(propList);
@@ -102,6 +134,7 @@ T* malloc_device(std::size_t count, const queue &q,
 inline void *aligned_alloc_device(std::size_t alignment, std::size_t num_bytes,
                                   const device &dev, const context &ctx,
                                   const property_list &propList = {}) {
+  verify_exportable_device_allocation(dev, propList);
   if (num_bytes == 0)
     return nullptr;
   rt::allocation_hints hints = create_hints_from_proplist(propList);
@@ -136,6 +169,7 @@ T *aligned_alloc_device(std::size_t alignment, std::size_t count,
 
 inline void *malloc_host(std::size_t num_bytes, const context &ctx,
                          const property_list &propList = {}) {
+  verify_not_exportable(propList);
   if (num_bytes == 0)
     return nullptr;
   rt::allocation_hints hints = create_hints_from_proplist(propList);
@@ -161,6 +195,7 @@ template <typename T> T *malloc_host(std::size_t count, const queue &q,
 inline void *malloc_shared(std::size_t num_bytes, const device &dev,
                            const context &ctx,
                            const property_list &propList = {}) {
+  verify_not_exportable(propList);
   if (num_bytes == 0)
     return nullptr;
   rt::allocation_hints hints = create_hints_from_proplist(propList);
@@ -188,6 +223,7 @@ template <typename T> T *malloc_shared(std::size_t count, const queue &q,
 inline void *aligned_alloc_host(std::size_t alignment, std::size_t num_bytes,
                                 const context &ctx,
                                 const property_list &propList = {}) {
+  verify_not_exportable(propList);
   if (num_bytes == 0)
     return nullptr;
   rt::allocation_hints hints = create_hints_from_proplist(propList);
@@ -220,6 +256,7 @@ T *aligned_alloc_host(std::size_t alignment, std::size_t count,
 inline void *aligned_alloc_shared(std::size_t alignment, std::size_t num_bytes,
                                   const device &dev, const context &ctx,
                                   const property_list &propList = {}) {
+  verify_not_exportable(propList);
   if (num_bytes == 0)
     return nullptr;
   rt::allocation_hints hints = create_hints_from_proplist(propList);
