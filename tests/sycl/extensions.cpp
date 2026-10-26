@@ -1744,6 +1744,143 @@ BOOST_AUTO_TEST_CASE(get_native_vk_allocation) {
   s::free(ptr, q);
 }
 #endif // ACPP_EXT_GET_NATIVE_ALLOCATION
+
+BOOST_AUTO_TEST_CASE(vk_external_memory) {
+  namespace s = sycl;
+
+  s::queue q;
+  if (q.get_device().get_backend() != s::backend::vk) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_memory: not a Vulkan device");
+    return;
+  }
+
+  // The aspect reports support for the platform's native handle type
+  BOOST_CHECK_EQUAL(
+      q.get_device().has(s::aspect::AdaptiveCpp_exportable_device_allocations),
+      s::AdaptiveCpp_vk_interop::has_external_memory_support(q.get_device()));
+
+  if (!s::AdaptiveCpp_vk_interop::has_external_memory_support(q.get_device())) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_memory: device does not support "
+                       "external memory handles");
+    return;
+  }
+
+  constexpr std::size_t n = 64;
+  const s::property_list props{s::property::usm::AdaptiveCpp_exportable{}};
+  int *ptr = s::malloc_device<int>(n, q.get_device(), q.get_context(), props);
+  BOOST_REQUIRE(ptr != nullptr);
+
+  // The allocation is usable like any other device USM allocation
+  q.fill(ptr, 1, n).wait();
+
+  auto handle =
+      s::AdaptiveCpp_vk_interop::export_memory(ptr + 1, q.get_context());
+  BOOST_CHECK(handle.handle.is_valid());
+  BOOST_CHECK(handle.handle.type ==
+              s::AdaptiveCpp_vk_interop::native_external_handle_type);
+  BOOST_CHECK(handle.allocation_size >= n * sizeof(int));
+  BOOST_CHECK_EQUAL(handle.offset, sizeof(int));
+  BOOST_CHECK_EQUAL(handle.size, (n - 1) * sizeof(int));
+  s::AdaptiveCpp_vk_interop::close_external_handle(handle.handle);
+
+  s::free(ptr, q);
+
+  // Allocations that were not requested to be exportable cannot be exported
+  int *not_exportable = s::malloc_device<int>(n, q);
+  BOOST_REQUIRE(not_exportable != nullptr);
+  auto invalid =
+      s::AdaptiveCpp_vk_interop::export_memory(not_exportable, q.get_context());
+  BOOST_CHECK(!invalid.handle.is_valid());
+  s::free(not_exportable, q);
+}
+
+BOOST_AUTO_TEST_CASE(vk_external_semaphore) {
+  namespace s = sycl;
+
+  const s::property_list props{s::property::queue::in_order{}};
+  s::queue producer{props};
+  if (producer.get_device().get_backend() != s::backend::vk) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_semaphore: not a Vulkan device");
+    return;
+  }
+
+  if (!s::AdaptiveCpp_vk_interop::has_external_semaphore_support(
+          producer.get_device())) {
+    BOOST_TEST_MESSAGE("Skipping vk_external_semaphore: device does not "
+                       "support external semaphore handles");
+    return;
+  }
+
+  constexpr std::size_t n = 1;
+  int *value = s::malloc_device<int>(n, producer);
+  BOOST_REQUIRE(value != nullptr);
+
+  s::event produced = producer.single_task([=]() { *value = 41; });
+  auto exported = s::AdaptiveCpp_vk_interop::export_semaphore(produced);
+  BOOST_REQUIRE(exported.handle.is_valid());
+
+  // Importing the payload again gives a semaphore sharing the same timeline,
+  // which an application driving its own VkDevice would do.
+  s::AdaptiveCpp_vk_interop::imported_semaphore semaphore{producer.get_device(),
+                                                          exported.handle};
+  BOOST_REQUIRE(static_cast<bool>(semaphore));
+  BOOST_CHECK(semaphore.get_device() == producer.get_device());
+  // Importing a file descriptor takes ownership of it, a Win32 handle on the
+  // other hand still has to be closed by us.
+  if (exported.handle.type ==
+      s::AdaptiveCpp_vk_interop::external_handle_type::opaque_win32) {
+    s::AdaptiveCpp_vk_interop::close_external_handle(exported.handle);
+  }
+
+  s::event imported =
+      s::AdaptiveCpp_vk_interop::make_event(semaphore, exported.value);
+
+  s::queue consumer{producer.get_context(), producer.get_device(), props};
+  s::event consumed = consumer.submit([&](s::handler &cgh) {
+    cgh.depends_on(imported);
+    cgh.single_task([=]() { *value += 1; });
+  });
+  consumed.wait();
+
+  int result = 0;
+  consumer.copy(value, &result, n).wait();
+  BOOST_CHECK_EQUAL(result, 42);
+
+  s::free(value, producer);
+}
+
+BOOST_AUTO_TEST_CASE(vk_imported_semaphore_outlives_queue) {
+  namespace s = sycl;
+
+  s::AdaptiveCpp_vk_interop::imported_semaphore semaphore;
+  {
+    s::queue q{s::property::queue::in_order{}};
+    if (q.get_device().get_backend() != s::backend::vk ||
+        !s::AdaptiveCpp_vk_interop::has_external_semaphore_support(
+            q.get_device())) {
+      BOOST_TEST_MESSAGE("Skipping vk_imported_semaphore_outlives_queue: "
+                         "device does not support external semaphore handles");
+      return;
+    }
+
+    auto exported =
+        s::AdaptiveCpp_vk_interop::export_semaphore(q.single_task([]() {}));
+    BOOST_REQUIRE(exported.handle.is_valid());
+    semaphore = s::AdaptiveCpp_vk_interop::imported_semaphore{q.get_device(),
+                                                              exported.handle};
+    BOOST_REQUIRE(static_cast<bool>(semaphore));
+    if (exported.handle.type ==
+        s::AdaptiveCpp_vk_interop::external_handle_type::opaque_win32) {
+      s::AdaptiveCpp_vk_interop::close_external_handle(exported.handle);
+    }
+    q.wait();
+  }
+
+  // The semaphore is now the only object referring to the runtime, which has
+  // to stay alive until the semaphore is destroyed.
+  semaphore.reset();
+  BOOST_CHECK(!semaphore);
+}
 #endif // ACPP_EXT_VK_INTEROP
 
 BOOST_AUTO_TEST_SUITE_END()

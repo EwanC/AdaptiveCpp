@@ -828,6 +828,10 @@ Requesting one for a device that does not have `sycl::aspect::AdaptiveCpp_export
 throws a `sycl::exception` with `sycl::errc::feature_not_supported`. The same exception is thrown when the
 property is passed to host or shared USM allocation functions, as only device allocations can be exportable.
 
+In the Vulkan backend the allocation is made exportable as an opaque handle - a POSIX file
+descriptor, or an NT handle on Windows - with `sycl::AdaptiveCpp_vk_interop::export_memory()`, which allows
+sharing it with a `VkDevice` that the application owns itself. See the [Vulkan backend documentation](install-vulkan.md#sharing-with-a-vkdevice-the-application-owns).
+
 Example:
 ```cpp
 sycl::queue q;
@@ -838,13 +842,53 @@ if(dev.has(sycl::aspect::AdaptiveCpp_exportable_device_allocations)) {
       n, dev, q.get_context(),
       sycl::property_list{sycl::property::usm::AdaptiveCpp_exportable{}});
 
-  // Export p through the interop API of the device's backend
+  // Export p, e.g. with sycl::AdaptiveCpp_vk_interop::export_memory()
 
   sycl::free(p, q);
 }
 ```
 
-Currently not implemented by any backend.
+Currently implemented for Vulkan, on devices that support sharing device memory through the handle type
+of the platform, see `sycl::AdaptiveCpp_vk_interop::has_external_memory_support()`.
+
+### `ACPP_EXT_VK_INTEROP`
+
+Adds the `sycl::AdaptiveCpp_vk_interop` namespace, which allows sharing device USM allocations and synchronization
+of the Vulkan backend with a `VkDevice` that the application has created itself, e.g. because it needs graphics
+or presentation. Allocations and timeline semaphores are shared through the opaque handles of
+`VK_KHR_external_memory_{fd,win32}` and `VK_KHR_external_semaphore_{fd,win32}`.
+
+This extension is only available when compiling with support for the Vulkan backend, i.e. when
+`SYCL_EXT_ACPP_BACKEND_VK` is defined, and the Vulkan headers can be found by the compiler. `ACPP_EXT_VK_INTEROP`
+is only defined in this case, which also applies to the interop functions of `sycl::backend::vk`, such as
+`sycl::get_native<sycl::backend::vk>()`. Whether a device supports sharing allocations and semaphores is queried
+at runtime.
+
+| Function                                 | Description                                                                        |
+| ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| `has_external_memory_support(device)`    | Whether allocations of the device can be exported                                  |
+| `has_external_semaphore_support(device)` | Whether timeline semaphores of the device can be exported and imported             |
+| `export_memory(ptr, context)`            | Exports an allocation created with `sycl::property::usm::AdaptiveCpp_exportable`   |
+| `export_semaphore(event)`                | Exports the timeline semaphore of an event, and the value it attains on completion |
+| `imported_semaphore{device, handle}`     | Imports a timeline semaphore of the application into the `VkDevice` of a device    |
+| `make_event(imported_semaphore, value)`  | Returns an event that is complete once the imported semaphore reaches `value`      |
+| `close_external_handle(handle)`          | Releases an exported handle, if the ownership rules of its type require it         |
+
+Example:
+```cpp
+sycl::queue q;
+sycl::event e = q.single_task([=](){ /* ... */ });
+
+if(sycl::AdaptiveCpp_vk_interop::has_external_semaphore_support(q.get_device())) {
+  auto sem = sycl::AdaptiveCpp_vk_interop::export_semaphore(e);
+  // Import sem.handle into a timeline semaphore of the application's VkDevice
+  // with VkImportSemaphoreFdInfoKHR, and wait for sem.value there.
+}
+```
+
+See the [Vulkan backend documentation](install-vulkan.md#sharing-with-a-vkdevice-the-application-owns) for details,
+including how to identify the physical device to create the application's `VkDevice` for, and the ownership rules
+of the exported handles.
 
 ### `ACPP_EXT_DEVICE_FREE_MEMORY`
 

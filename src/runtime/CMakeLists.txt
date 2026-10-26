@@ -272,6 +272,10 @@ if(WITH_VULKAN_BACKEND)
 
   # Need portability subset beta extension for moltenvk
   target_compile_definitions(rt-backend-vk PRIVATE -DVK_ENABLE_BETA_EXTENSIONS)
+  # Needed for the external memory/semaphore Win32 handle interop entry points
+  if(WIN32)
+    target_compile_definitions(rt-backend-vk PRIVATE -DVK_USE_PLATFORM_WIN32_KHR)
+  endif()
   if(WITH_SSCP_COMPILER)
     target_compile_definitions(rt-backend-vk PRIVATE -DHIPSYCL_WITH_SSCP_COMPILER)
     target_link_libraries(rt-backend-vk PRIVATE llvm-to-clspv)

@@ -53,7 +53,9 @@ private:
 // The device has to have aspect::AdaptiveCpp_exportable_device_allocations,
 // otherwise the allocation functions throw an exception with
 // errc::feature_not_supported, as they also do for host and shared
-// allocations.
+// allocations. In the Vulkan backend this makes the allocation exportable as
+// an opaque file descriptor, or an NT handle on Windows, see
+// sycl::AdaptiveCpp_vk_interop::export_memory().
 class AdaptiveCpp_exportable : public detail::usm_property
 {
 };

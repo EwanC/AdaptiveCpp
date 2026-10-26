@@ -14,6 +14,7 @@
 #include "../hardware.hpp"
 #include "hipSYCL/runtime/vk/vk_native_objects.hpp"
 #include <mutex>
+#include <unordered_map>
 #include <vulkan/vulkan_raii.hpp>
 
 namespace hipsycl {
@@ -50,11 +51,35 @@ enum extension_bits : uint16_t {
   khr_portability_subset = 1 << 0,
   khr_calibrated_timestamps = 1 << 1,
   ext_calibrated_timestamps = 1 << 2,
+  khr_external_memory_fd = 1 << 3,
+  khr_external_semaphore_fd = 1 << 4,
+  khr_external_memory_win32 = 1 << 5,
+  khr_external_semaphore_win32 = 1 << 6,
 };
 } // namespace vk_device_extensions
 
+// The Vulkan handle type bits matching vk_native_external_handle_type. Objects
+// the runtime creates as exportable use these, as no implementation supports
+// both opaque file descriptors and Win32 handles.
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+inline constexpr vk::ExternalMemoryHandleTypeFlagBits
+    vk_native_external_memory_handle_bit =
+        vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+inline constexpr vk::ExternalSemaphoreHandleTypeFlagBits
+    vk_native_external_semaphore_handle_bit =
+        vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueWin32;
+#else
+inline constexpr vk::ExternalMemoryHandleTypeFlagBits
+    vk_native_external_memory_handle_bit =
+        vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd;
+inline constexpr vk::ExternalSemaphoreHandleTypeFlagBits
+    vk_native_external_semaphore_handle_bit =
+        vk::ExternalSemaphoreHandleTypeFlagBits::eOpaqueFd;
+#endif
+
 class vk_hardware_context : public hardware_context,
-                            public vk_native_device_provider {
+                            public vk_native_device_provider,
+                            public vk_native_external_semaphore_provider {
 public:
   vk_hardware_context(const vk::raii::PhysicalDevice &, VkInstance instance,
                       int dev_id, uint16_t features);
@@ -86,6 +111,44 @@ public:
   void init();
 
   vk_device_native_handle get_native_device_handle() const override;
+
+  bool
+  has_external_semaphore_support(vk_external_handle_type type) const override;
+  bool export_semaphore_handle(VkSemaphore semaphore,
+                               vk_external_handle_type type,
+                               vk_external_handle &out) const override;
+  VkSemaphore
+  import_timeline_semaphore(const vk_external_handle &handle) override;
+  void destroy_imported_semaphore(VkSemaphore semaphore) override;
+
+  bool has_external_memory_support(vk_external_handle_type type) const {
+    return type == vk_native_external_handle_type && _external_memory_supported;
+  }
+
+  // Extension bit providing the given external memory handle type, or 0 if
+  // the handle type is not supported by this platform at all.
+  static uint16_t external_memory_extension_bit(vk_external_handle_type type) {
+    if (type == vk_external_handle_type::opaque_fd)
+      return vk_device_extensions::khr_external_memory_fd;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (type == vk_external_handle_type::opaque_win32)
+      return vk_device_extensions::khr_external_memory_win32;
+#endif
+    return 0;
+  }
+
+  // Extension bit providing the given external semaphore handle type, or 0 if
+  // the handle type is not supported by this platform at all.
+  static uint16_t
+  external_semaphore_extension_bit(vk_external_handle_type type) {
+    if (type == vk_external_handle_type::opaque_fd)
+      return vk_device_extensions::khr_external_semaphore_fd;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (type == vk_external_handle_type::opaque_win32)
+      return vk_device_extensions::khr_external_semaphore_win32;
+#endif
+    return 0;
+  }
 
   const vk::raii::Device &get_device() const { return _device; }
   const vk::raii::PhysicalDevice &get_physical_device() const {
@@ -131,8 +194,21 @@ private:
   size_t _max_alloc_size{};
 
   int _dev_id;
+  // Semaphores created on this device from imported external payloads, owned
+  // by the runtime on behalf of the user until explicitly destroyed. Held
+  // indirectly so that vk_hardware_context remains movable.
+  struct imported_semaphore_store {
+    std::unordered_map<VkSemaphore, vk::raii::Semaphore> _semaphores;
+    std::mutex _mutex;
+  };
+  std::unique_ptr<imported_semaphore_store> _imported_semaphores;
+
   uint16_t _physical_dev_features;
   uint16_t _enabled_extensions;
+  // Whether device USM allocations and timeline semaphores can be shared
+  // through handles of type vk_native_external_handle_type
+  bool _external_memory_supported = false;
+  bool _external_semaphore_supported = false;
   std::unique_ptr<vk_allocator> _allocator;
 };
 

@@ -129,12 +129,15 @@ vk_allocator::create_uniform_buffers(std::vector<vk::DeviceSize> sizes) {
   return {std::move(buffers), std::move(offsets), std::move(buffer_mem)};
 }
 
-std::tuple<vk::raii::Buffer, vk::raii::DeviceMemory, vk::MemoryPropertyFlags>
-vk_allocator::create_device_address_buffer(vk::DeviceSize size) {
-  constexpr vk::BufferUsageFlags usage_flags =
-      vk::BufferUsageFlagBits::eTransferSrc |
-      vk::BufferUsageFlagBits::eTransferDst |
-      vk::BufferUsageFlagBits::eShaderDeviceAddress;
+vk_buffer_allocation
+vk_allocator::create_device_address_buffer(vk::DeviceSize size,
+                                           bool exportable) {
+  if (exportable &&
+      !has_external_memory_support(vk_native_external_handle_type)) {
+    throw sycl::exception{
+        sycl::make_error_code(sycl::errc::feature_not_supported),
+        "Vulkan device does not support external memory handles"};
+  }
 
   // This function allocates a device USM pointer, so make an effort to
   // use a device pointer. Ideally this will also be from host visible and
@@ -148,7 +151,15 @@ vk_allocator::create_device_address_buffer(vk::DeviceSize size) {
       vk::MemoryPropertyFlagBits::eDeviceLocal;
 
   vk::BufferCreateInfo buffer_info{
-      {}, size, usage_flags, vk::SharingMode::eExclusive};
+      {}, size, vk_device_address_buffer_usage, vk::SharingMode::eExclusive};
+
+  // Buffers bound to memory that may be exported have to be created as such
+  vk::ExternalMemoryBufferCreateInfo external_buffer_info{
+      vk_native_external_memory_handle_bit};
+  if (exportable) {
+    buffer_info.pNext = &external_buffer_info;
+  }
+
   const auto &device = _hw_ctx->get_device();
   vk::raii::Buffer buffer(device, buffer_info);
 
@@ -175,10 +186,20 @@ vk_allocator::create_device_address_buffer(vk::DeviceSize size) {
   flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
   alloc_info.pNext = &flags_info;
 
+  VkExportMemoryAllocateInfo export_info{};
+  if (exportable) {
+    export_info.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    export_info.handleTypes = static_cast<VkExternalMemoryHandleTypeFlags>(
+        vk_native_external_memory_handle_bit);
+    export_info.pNext = flags_info.pNext;
+    flags_info.pNext = &export_info;
+  }
+
   vk::raii::DeviceMemory buffer_mem(device, alloc_info);
   buffer.bindMemory(buffer_mem, 0);
 
-  return std::make_tuple(std::move(buffer), std::move(buffer_mem), mem_flags);
+  return vk_buffer_allocation{std::move(buffer), std::move(buffer_mem),
+                              mem_flags, mem_reqs.size, mem_type_index};
 }
 
 vk_alloc_info *vk_allocator::find_user_alloc(vk::DeviceAddress ptr) {
@@ -222,6 +243,80 @@ bool vk_allocator::get_native_allocation(
       out.size = end - dev_ptr;
       return true;
     }
+  }
+
+  return false;
+}
+
+bool vk_allocator::has_external_memory_support(
+    vk_external_handle_type type) const {
+  return _hw_ctx->has_external_memory_support(type);
+}
+
+bool vk_allocator::export_allocation_handle(
+    const void *ptr, vk_external_handle_type type,
+    vk_external_memory_native_handle &out) const {
+  if (!has_external_memory_support(type)) {
+    print_error(__acpp_here(),
+                error_info{"vk_allocator: the requested external memory "
+                           "handle type is not supported by this device"});
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock{_mutex};
+
+  const auto dev_ptr = reinterpret_cast<vk::DeviceAddress>(ptr);
+  for (const auto &alloc : _allocs) {
+    const vk_alloc_info &alloc_info = alloc.second;
+    assert(alloc_info._base_ptr.has_value());
+    const vk::DeviceAddress base = alloc_info._base_ptr.value();
+    const vk::DeviceAddress end = base + alloc_info.bytes;
+    if (dev_ptr < base || dev_ptr >= end) {
+      continue;
+    }
+
+    if (!alloc_info._exportable) {
+      print_error(
+          __acpp_here(),
+          error_info{"vk_allocator: allocation was not created as exportable"});
+      return false;
+    }
+
+    try {
+      if (type == vk_external_handle_type::opaque_fd) {
+        vk::MemoryGetFdInfoKHR get_fd_info{
+            *alloc_info._dev_mem,
+            vk::ExternalMemoryHandleTypeFlagBits::eOpaqueFd};
+        out.handle = vk_external_handle::from_fd(
+            _hw_ctx->get_device().getMemoryFdKHR(get_fd_info));
+      } else {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+        vk::MemoryGetWin32HandleInfoKHR get_handle_info{
+            *alloc_info._dev_mem,
+            vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32};
+        out.handle = vk_external_handle::from_win32_handle(
+            _hw_ctx->get_device().getMemoryWin32HandleKHR(get_handle_info));
+#else
+        return false;
+#endif
+      }
+    } catch (const std::exception &e) {
+      print_error(__acpp_here(),
+                  error_info{std::string("vk_allocator: could not export "
+                                         "memory handle - ")
+                                 .append(e.what())});
+      return false;
+    }
+
+    if (!out.handle.is_valid()) {
+      return false;
+    }
+
+    out.allocation_size = alloc_info._allocation_size;
+    out.memory_type_index = alloc_info._memory_type_index;
+    out.offset = dev_ptr - base;
+    out.size = end - dev_ptr;
+    return true;
   }
 
   return false;
@@ -273,27 +368,38 @@ vk_alloc_info *vk_allocator::staging_allocate(size_t size_bytes) {
 
   return new vk_alloc_info{
       vk_alloc_type::STAGING, std::nullopt,          size_bytes,
-      std::move(buffer),      std::move(buffer_mem), mem_flags};
+      std::move(buffer),      std::move(buffer_mem), mem_flags,
+      mem_reqs.size,          mem_type_index,        false};
 }
 
 void *vk_allocator::raw_allocate(size_t, size_t size_bytes,
-                                 const allocation_hints &) {
+                                 const allocation_hints &hints) {
   std::lock_guard<std::mutex> lock{_mutex};
 
-  auto [buffer, device_mem, mem_flags] =
-      create_device_address_buffer(size_bytes);
+  // Memory is only made shareable with other Vulkan devices if the user has
+  // explicitly asked for it, since exporting constrains the allocation.
+  const bool exportable = hints.AdaptiveCpp_exportable.value_or(false);
 
-  vk::BufferDeviceAddressInfo addr_info{buffer};
+  vk_buffer_allocation allocation =
+      create_device_address_buffer(size_bytes, exportable);
+
+  vk::BufferDeviceAddressInfo addr_info{allocation._buffer};
   vk::DeviceAddress ptr = _hw_ctx->get_device().getBufferAddress(addr_info);
 
-  vk_alloc_info alloc_info{
-      vk_alloc_type::USER,   ptr,      size_bytes, std::move(buffer),
-      std::move(device_mem), mem_flags};
+  vk_alloc_info alloc_info{vk_alloc_type::USER,
+                           ptr,
+                           size_bytes,
+                           std::move(allocation._buffer),
+                           std::move(allocation._dev_mem),
+                           allocation._mem_flags,
+                           allocation._allocation_size,
+                           allocation._memory_type_index,
+                           exportable};
   _allocs.insert({ptr, std::move(alloc_info)});
 
   HIPSYCL_DEBUG_INFO << "vk_allocator: user allocated " << size_bytes
                      << " bytes at 0x" << std::hex << ptr << std::dec
-                     << std::endl;
+                     << (exportable ? " (exportable)" : "") << std::endl;
   return reinterpret_cast<void *>(ptr);
 }
 

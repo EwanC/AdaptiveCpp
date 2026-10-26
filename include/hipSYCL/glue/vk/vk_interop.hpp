@@ -17,8 +17,8 @@
 #if defined(__has_include)
 #if __has_include(<vulkan/vulkan_core.h>)
 #define ACPP_GLUE_VK_INTEROP_AVAILABLE
-// Feature test macro of the Vulkan backend interop API, which is only defined
-// here as it depends on the Vulkan headers
+// Feature test macro of the sycl::AdaptiveCpp_vk_interop extension, which is
+// only defined here as it also depends on the Vulkan headers
 #define ACPP_EXT_VK_INTEROP
 #endif
 #endif
@@ -39,6 +39,17 @@
 #include "hipSYCL/sycl/device.hpp"
 #include "hipSYCL/sycl/event.hpp"
 #include "hipSYCL/sycl/platform.hpp"
+
+#include <optional>
+
+#ifdef _WIN32
+// Declared manually so that this header does not have to pull in the entirety
+// of <windows.h>. This matches the declaration in <windows.h>, so including
+// that in addition is fine.
+extern "C" __declspec(dllimport) int __stdcall CloseHandle(void *hObject);
+#else
+#include <unistd.h>
+#endif
 
 namespace hipsycl {
 namespace glue {
@@ -120,6 +131,48 @@ inline bool get_device_handle(const sycl::device &d,
   return true;
 }
 
+// Returns the external semaphore operations of a device of the Vulkan backend,
+// or nullptr if dev is not such a device.
+inline rt::vk_native_external_semaphore_provider *
+get_external_semaphore_provider(const sycl::device &dev) {
+  rt::device_id dev_id = sycl::detail::extract_rt_device(dev);
+  if (dev_id.get_backend() != rt::backend_id::vk) {
+    return nullptr;
+  }
+
+  rt::backend *b =
+      dev.AdaptiveCpp_runtime()->backends().get(rt::backend_id::vk);
+  if (!b) {
+    return nullptr;
+  }
+
+  return dynamic_cast<rt::vk_native_external_semaphore_provider *>(
+      b->get_hardware_manager()->get_device(dev_id.get_id()));
+}
+
+// Returns the external semaphore operations of the device of the Vulkan
+// backend that has created the given VkDevice, or nullptr if there is none.
+inline rt::vk_native_external_semaphore_provider *
+get_external_semaphore_provider(rt::runtime *runtime, VkDevice device) {
+  rt::backend *b = runtime->backends().get(rt::backend_id::vk);
+  if (!b || device == VK_NULL_HANDLE) {
+    return nullptr;
+  }
+
+  rt::backend_hardware_manager *hw_manager = b->get_hardware_manager();
+  for (std::size_t i = 0; i < hw_manager->get_num_devices(); ++i) {
+    auto *dev_provider = dynamic_cast<rt::vk_native_device_provider *>(
+        hw_manager->get_device(i));
+    if (dev_provider &&
+        dev_provider->get_native_device_handle().device == device) {
+      return dynamic_cast<rt::vk_native_external_semaphore_provider *>(
+          hw_manager->get_device(i));
+    }
+  }
+
+  return nullptr;
+}
+
 // Turns an event that the backend has created from a native Vulkan event of
 // the given device into a SYCL event.
 inline sycl::event
@@ -139,6 +192,23 @@ make_imported_event(rt::runtime *runtime, rt::device_id dev,
   node->mark_submitted(std::move(runtime_event));
 
   return sycl::event{node};
+}
+
+inline rt::vk_native_external_memory_provider *
+get_external_memory_provider(const sycl::device &dev) {
+  rt::device_id dev_id = sycl::detail::extract_rt_device(dev);
+  if (dev_id.get_backend() != rt::backend_id::vk) {
+    return nullptr;
+  }
+
+  rt::backend *b =
+      dev.AdaptiveCpp_runtime()->backends().get(rt::backend_id::vk);
+  if (!b) {
+    return nullptr;
+  }
+
+  return dynamic_cast<rt::vk_native_external_memory_provider *>(
+      b->get_allocator(dev_id));
 }
 
 } // namespace vk_interop_detail
@@ -417,6 +487,256 @@ template <> struct backend_interop<sycl::backend::vk> {
 };
 
 } // namespace glue
+} // namespace hipsycl
+
+namespace hipsycl {
+namespace sycl {
+
+// Interop with Vulkan devices that AdaptiveCpp does not own. An application
+// that drives a VkDevice of its own - for example because it needs graphics,
+// presentation, or extensions and features the backend does not enable - can
+// keep its own VkInstance and VkDevice, and share memory and synchronization
+// with the Vulkan backend through opaque external handles of
+// VK_KHR_external_memory_{fd,win32} and VK_KHR_external_semaphore_{fd,win32}.
+// Both devices must be created for the same physical device and driver, which
+// is the case if VkPhysicalDeviceIDProperties reports the same deviceUUID and
+// driverUUID for them. VkPhysicalDevice handles cannot be compared instead, as
+// they differ between VkInstances, but the properties can be queried for the
+// handle that sycl::get_native<sycl::backend::vk>(device) returns.
+namespace AdaptiveCpp_vk_interop {
+
+using external_handle_type = rt::vk_external_handle_type;
+using external_handle = rt::vk_external_handle;
+using external_memory_handle = rt::vk_external_memory_native_handle;
+using external_semaphore_handle = rt::vk_external_semaphore_native_handle;
+
+// The handle type supported by the platform AdaptiveCpp was built for. No
+// Vulkan implementation supports both opaque file descriptors and Win32
+// handles, so this is the handle type applications will want to use, and the
+// default of all entry points below.
+inline constexpr external_handle_type native_external_handle_type =
+    rt::vk_native_external_handle_type;
+
+// Closes an external handle that was returned by export_memory() or
+// export_semaphore(). File descriptors must not be closed once they have been
+// imported, since the import takes ownership of them. Win32 handles on the
+// other hand must always be closed, also after a successful import.
+inline void close_external_handle(const external_handle &handle) {
+  if (!handle.is_valid()) {
+    return;
+  }
+#ifdef _WIN32
+  if (handle.type == external_handle_type::opaque_win32) {
+    ::CloseHandle(handle.win32_handle);
+  }
+#else
+  if (handle.type == external_handle_type::opaque_fd) {
+    ::close(handle.fd);
+  }
+#endif
+}
+
+// Whether USM allocations of this device can be exported as opaque external
+// handles of the given type.
+inline bool has_external_memory_support(
+    const device &dev,
+    external_handle_type type = native_external_handle_type) {
+  auto *provider = glue::vk_interop_detail::get_external_memory_provider(dev);
+  return provider && provider->has_external_memory_support(type);
+}
+
+// Whether timeline semaphores of this device can be exported to, and imported
+// from, opaque external handles of the given type.
+inline bool has_external_semaphore_support(
+    const device &dev,
+    external_handle_type type = native_external_handle_type) {
+  auto *provider =
+      glue::vk_interop_detail::get_external_semaphore_provider(dev);
+  return provider && provider->has_external_semaphore_support(type);
+}
+
+// Exports the memory of the USM allocation that ptr belongs to as an opaque
+// external handle, which the application can import into its own VkDevice.
+// The allocation must have been created with the
+// sycl::property::usm::AdaptiveCpp_exportable property. On failure, a handle
+// for which handle.is_valid() is false is returned. The returned handle is
+// owned by the caller and has to be released with close_external_handle()
+// once it is no longer needed - note that importing a file descriptor already
+// transfers its ownership, while importing a Win32 handle does not.
+inline external_memory_handle
+export_memory(const void *ptr, const context &ctx,
+              external_handle_type type = native_external_handle_type) {
+  external_memory_handle result{external_handle{}, 0, 0, 0, 0};
+
+  for (const device &dev : ctx.get_devices()) {
+    auto *provider = glue::vk_interop_detail::get_external_memory_provider(dev);
+    if (!provider) {
+      continue;
+    }
+
+    if (provider->export_allocation_handle(ptr, type, result)) {
+      return result;
+    }
+  }
+
+  return external_memory_handle{external_handle{}, 0, 0, 0, 0};
+}
+
+// Exports the timeline semaphore backing a SYCL event as an opaque external
+// handle, together with the value the timeline attains once the operation has
+// completed. The application must not signal values on the imported payload,
+// since the semaphore is the timeline AdaptiveCpp uses internally. On failure,
+// a handle for which handle.is_valid() is false is returned. See
+// export_memory() for the ownership of the returned handle.
+inline external_semaphore_handle
+export_semaphore(const event &e,
+                 external_handle_type type = native_external_handle_type) {
+  auto native_event = glue::backend_interop<backend::vk>::get_native_event(e);
+  if (native_event.semaphore == VK_NULL_HANDLE) {
+    return external_semaphore_handle{external_handle{}, 0};
+  }
+
+  rt::runtime_keep_alive_token runtime;
+  auto *provider = glue::vk_interop_detail::get_external_semaphore_provider(
+      runtime.get(), native_event.device);
+  if (!provider) {
+    rt::register_error(
+        __acpp_here(),
+        rt::error_info{"export_semaphore: event does not belong to a device "
+                       "of the Vulkan backend",
+                       rt::error_type::invalid_parameter_error});
+    return external_semaphore_handle{external_handle{}, 0};
+  }
+
+  external_handle handle;
+  if (!provider->export_semaphore_handle(native_event.semaphore, type,
+                                         handle)) {
+    return external_semaphore_handle{external_handle{}, 0};
+  }
+
+  return external_semaphore_handle{handle, native_event.value};
+}
+
+// A timeline semaphore of the application, imported into the VkDevice that
+// AdaptiveCpp has created for a device. SYCL work can be made to wait on values
+// of the imported timeline by turning them into events with make_event(). The
+// object must not be destroyed or reset before all SYCL work that depends on
+// these events has completed, as the semaphore is destroyed with it. It keeps
+// the SYCL runtime alive until it is destroyed or reset.
+class imported_semaphore {
+public:
+  imported_semaphore() = default;
+
+  // Imports the timeline semaphore described by an opaque external handle
+  // into the VkDevice of dev. If the handle is a file descriptor, ownership of
+  // it is transferred to the Vulkan implementation on success. A Win32 handle
+  // on the other hand stays owned by the caller, which has to close it once
+  // the import has returned.
+  imported_semaphore(const device &dev, const external_handle &handle) {
+    auto *provider =
+        glue::vk_interop_detail::get_external_semaphore_provider(dev);
+    if (!provider) {
+      rt::register_error(
+          __acpp_here(),
+          rt::error_info{"imported_semaphore: device does not belong to the "
+                         "Vulkan backend",
+                         rt::error_type::invalid_parameter_error});
+      return;
+    }
+
+    _semaphore = provider->import_timeline_semaphore(handle);
+    if (_semaphore != VK_NULL_HANDLE) {
+      _provider = provider;
+      _device.emplace(dev);
+    }
+  }
+
+  imported_semaphore(const imported_semaphore &) = delete;
+  imported_semaphore &operator=(const imported_semaphore &) = delete;
+
+  imported_semaphore(imported_semaphore &&other) noexcept
+      : _provider{other._provider}, _semaphore{other._semaphore},
+        _device{std::move(other._device)} {
+    other._provider = nullptr;
+    other._semaphore = VK_NULL_HANDLE;
+    other._device.reset();
+  }
+
+  imported_semaphore &operator=(imported_semaphore &&other) noexcept {
+    if (this != &other) {
+      reset();
+      _provider = other._provider;
+      _semaphore = other._semaphore;
+      _device = std::move(other._device);
+      other._provider = nullptr;
+      other._semaphore = VK_NULL_HANDLE;
+      other._device.reset();
+    }
+    return *this;
+  }
+
+  ~imported_semaphore() { reset(); }
+
+  void reset() {
+    if (_provider && _semaphore != VK_NULL_HANDLE) {
+      _provider->destroy_imported_semaphore(_semaphore);
+    }
+    _provider = nullptr;
+    _semaphore = VK_NULL_HANDLE;
+    // Only release the runtime once the semaphore has been destroyed
+    _device.reset();
+  }
+
+  // The semaphore created inside the VkDevice of get_device(). It shares its
+  // payload with the semaphore the handle was exported from.
+  VkSemaphore get() const { return _semaphore; }
+
+  // The device the semaphore has been imported into
+  device get_device() const {
+    if (!*this) {
+      throw exception{make_error_code(errc::invalid),
+                      "imported_semaphore: no semaphore has been imported"};
+    }
+    return *_device;
+  }
+
+  explicit operator bool() const { return _semaphore != VK_NULL_HANDLE; }
+
+private:
+  rt::vk_native_external_semaphore_provider *_provider = nullptr;
+  VkSemaphore _semaphore = VK_NULL_HANDLE;
+  // Keeps the runtime, which owns the semaphore, alive
+  std::optional<device> _device;
+};
+
+// Returns an event that is complete once the imported timeline semaphore
+// reaches the given value. SYCL operations can be made to wait on the
+// application's work by depending on this event.
+inline event make_event(const imported_semaphore &semaphore, uint64_t value) {
+  if (!semaphore) {
+    throw exception{make_error_code(errc::invalid),
+                    "make_event: invalid imported semaphore"};
+  }
+
+  const device dev = semaphore.get_device();
+  rt::runtime *runtime = dev.AdaptiveCpp_runtime();
+  rt::backend *backend = runtime->backends().get(rt::backend_id::vk);
+  const rt::device_id dev_id = sycl::detail::extract_rt_device(dev);
+  const rt::vk_event_native_handle native_event{semaphore.get(), value};
+
+  std::shared_ptr<rt::dag_node_event> runtime_event =
+      backend ? backend->create_event_from_native_handle(&native_event, dev_id)
+              : nullptr;
+  if (!runtime_event) {
+    throw exception{make_error_code(errc::invalid),
+                    "make_event: could not import the semaphore"};
+  }
+
+  return glue::vk_interop_detail::make_imported_event(runtime, dev_id,
+                                                      std::move(runtime_event));
+}
+} // namespace AdaptiveCpp_vk_interop
+} // namespace sycl
 } // namespace hipsycl
 
 #endif // ACPP_GLUE_VK_INTEROP_AVAILABLE
