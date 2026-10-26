@@ -13,6 +13,7 @@
 
 #include "../hardware.hpp"
 #include "hipSYCL/runtime/vk/vk_native_objects.hpp"
+#include <mutex>
 #include <vulkan/vulkan_raii.hpp>
 
 namespace hipsycl {
@@ -91,6 +92,9 @@ public:
     return _physical_device;
   }
   vk::raii::Queue &get_queue() { return _queue; }
+  // Has to be held while submitting to get_queue(), which is externally
+  // synchronized and shared by all vk_queues of the device.
+  std::mutex &get_queue_mutex() { return *_queue_mutex; }
   uint32_t get_queue_index() const { return _queue_index; }
   uint32_t get_max_push_constant_size() const {
     return _limits.maxPushConstantsSize;
@@ -116,6 +120,8 @@ private:
   vk::raii::Device _device = nullptr;
   uint32_t _queue_index = UINT32_MAX;
   vk::raii::Queue _queue = nullptr;
+  // Held indirectly so that vk_hardware_context remains movable
+  std::unique_ptr<std::mutex> _queue_mutex = std::make_unique<std::mutex>();
   vk::PhysicalDeviceProperties _properties{};
   vk::PhysicalDeviceLimits _limits{};
   size_t _subgroup_size{};

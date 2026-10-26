@@ -556,8 +556,11 @@ void vk_queue::submit_command_buffer(vk::CommandBuffer &cmd_buf) {
   vk::StructureChain<vk::SubmitInfo, vk::TimelineSemaphoreSubmitInfo>
       submit_info_chain(submit_info, timeline_info);
 
-  _dev_ctx->get_queue().submit(submit_info_chain.get<vk::SubmitInfo>(),
-                               nullptr);
+  {
+    std::lock_guard<std::mutex> lock{_dev_ctx->get_queue_mutex()};
+    _dev_ctx->get_queue().submit(submit_info_chain.get<vk::SubmitInfo>(),
+                                 nullptr);
+  }
   // Track the command-buffer and signal val as executing
   _executing_cmd_bufs.insert({signal_value, cmd_buf});
 
