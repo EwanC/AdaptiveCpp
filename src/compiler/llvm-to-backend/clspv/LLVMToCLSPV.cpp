@@ -20,6 +20,7 @@
 #include "hipSYCL/compiler/llvm-to-backend/clspv/FoldChainedGEPsPass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/clspv/MemsetLoweringPass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/clspv/RemoveUnusedIntrinsicsPass.hpp"
+#include "hipSYCL/compiler/llvm-to-backend/clspv/TypedGEPRecoveryPass.hpp"
 #include "hipSYCL/compiler/sscp/IRConstantReplacer.hpp"
 #include "hipSYCL/compiler/utils/LLVMUtils.hpp"
 #include "hipSYCL/glue/llvm-sscp/jit-reflection/queries.hpp"
@@ -419,6 +420,7 @@ bool LLVMToCLSPVTranslator::optimizeFlavoredIR(llvm::Module &M,
   MPM.addPass(llvm::createModuleToFunctionPassAdaptor(MemsetLoweringPass()));
   MPM.addPass(
       llvm::createModuleToFunctionPassAdaptor(FoldChainedGEPsPass()));
+  MPM.addPass(llvm::createModuleToFunctionPassAdaptor(TypedGEPRecoveryPass()));
   MPM.addPass(
       llvm::createModuleToFunctionPassAdaptor(AddrSpaceCastRemovalPass()));
   MPM.addPass(ConstantAddrSpacePass());

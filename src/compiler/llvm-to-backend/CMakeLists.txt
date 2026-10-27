@@ -431,6 +431,7 @@ if(WITH_SSCP_COMPILER)
       clspv/RemoveUnusedIntrinsicsPass.cpp
       clspv/MemsetLoweringPass.cpp
       clspv/ConstantAddrSpacePass.cpp
+      clspv/TypedGEPRecoveryPass.cpp
       TOOL clspv/LLVMToCLSPVTool.cpp)
 
     find_program(ACPP_CLSPV_PATH NAMES clspv REQUIRED CACHE STRING)

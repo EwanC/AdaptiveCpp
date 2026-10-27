@@ -120,6 +120,34 @@ This pass re-folds such chains back into a single typed GEP:
 The fold is applied only when the byte offset is an exact multiple of
 `sizeof(T)`, which is always the case for the specific instcombine transform.
 
+### TypedGEPRecoveryPass
+
+`instcombine` can also fold the scaling of a run-time index into the offset of
+a byte GEP, e.g. for `p += n` on an `int` pointer with a 32-bit `n`:
+
+```llvm
+%off  = ashr exact i64 (shl i64 %n, 32), 30
+%next = getelementptr i8, ptr %p, i64 %off
+```
+
+This is common at `ACPP_ADAPTIVITY_LEVEL=0`, where work-group sizes are
+run-time values, for loops striding by the work-group size such as the generic
+`joint_reduce` implementation. When such a GEP advances a pointer induction
+variable, the `SimplifyPointerBitcastPass` of `clspv` rewrites it between `i8`
+and the accessed type forever, hanging the compilation.
+
+When all loads and stores reached through the GEP (looking through further
+byte GEPs, PHI nodes and selects) access a single power-of-two sized type `T`,
+and the offset is known to be a multiple of `sizeof(T)`, this pass rewrites
+the GEP into a typed one:
+
+```llvm
+%idx  = ashr exact i64 %off, 2
+%next = getelementptr i32, ptr %p, i64 %idx
+```
+
+It must run after the last `instcombine`, which would undo the rewrite.
+
 ### AddrSpaceCastRemovalPass
 
 Remove casting away the address space from arguments, as otherwise
