@@ -46,11 +46,13 @@ HIPSYCL_SSCP_BUILTIN __acpp_int32 __acpp_sscp_isnormal_f64(double x) {
   return isnormal(x);
 }
 
-__acpp_int32 signbit(float);
-__acpp_int32 signbit(double);
+// Avoids using the OpenCL builtin as older versions of clspv
+// have a bug with `double` that is fixed in
+// https://github.com/google/clspv/pull/1710
 HIPSYCL_SSCP_BUILTIN __acpp_int32 __acpp_sscp_signbit_f32(float x) {
-  return signbit(x);
+  return __builtin_signbit(x);
 }
+
 HIPSYCL_SSCP_BUILTIN __acpp_int32 __acpp_sscp_signbit_f64(double x) {
-  return signbit(x);
+  return __builtin_signbit(x);
 }
