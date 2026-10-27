@@ -12,6 +12,16 @@ We need to pass `-long-vector` to clspv to avoid generating `Vector16`
 capability instructions which aren't supported. See clspv Github
 [issue 1573](https://github.com/google/clspv/issues/1573).
 
+We pass `-no-smsv` to disable the `ShareModuleScopeVariablesPass` of clspv. It
+merges `__local` variables of the same type that are used by different
+kernels, but it does not check the address space of the variables it merges
+with. When a kernel uses an `int` in local memory, e.g. for a work-group
+broadcast, as well as a builtin for which clspv creates a module scope `int`
+variable in another address space, e.g. the maximum sub-group size, clspv
+tries to merge the two and crashes. As each kernel only references its own
+variables, disabling the pass does not change the local memory used by a
+kernel.
+
 ## Generic Address Space
 
 One of the main challenge with the Vulkan backend is finding a way to

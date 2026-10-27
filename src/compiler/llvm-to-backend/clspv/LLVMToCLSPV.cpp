@@ -308,6 +308,12 @@ bool LLVMToCLSPVTranslator::translateToBackendFormat(
                                       "-long-vector",
                                       "-o=" + OutputFileName};
 
+  // clspv's ShareModuleScopeVariablesPass can try to merge a __local variable
+  // with one of the module scope builtin variables clspv creates, e.g. for the
+  // maximum sub-group size, if they have the same type. They are in different
+  // address spaces, which crashes clspv.
+  Args.push_back("-no-smsv");
+
   // Workaround for the Qualcomm Adreno driver on Android that struggles to
   // consume SPIR-V where the physical pointer arguments are passed in a push
   // constant with non zero member index. To avoid this pass each argument as
