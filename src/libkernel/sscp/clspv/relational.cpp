@@ -47,10 +47,11 @@ HIPSYCL_SSCP_BUILTIN __acpp_int32 __acpp_sscp_isnormal_f64(double x) {
 }
 
 __acpp_int32 signbit(float);
-__acpp_int32 signbit(double);
 HIPSYCL_SSCP_BUILTIN __acpp_int32 __acpp_sscp_signbit_f32(float x) {
   return signbit(x);
 }
+// Not the OpenCL builtin, which clspv lowers with an invalid zext from i64 to
+// i32 when converting the sign bit to the int result.
 HIPSYCL_SSCP_BUILTIN __acpp_int32 __acpp_sscp_signbit_f64(double x) {
-  return signbit(x);
+  return __builtin_signbit(x);
 }
