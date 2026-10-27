@@ -61,16 +61,24 @@ OutType wg_generic_scan(OutType x, BinaryOperation op, MemoryType shrd_mem, OutT
     }
     __acpp_sscp_work_group_barrier(__acpp_sscp_memory_scope::work_group,
                                    __acpp_sscp_memory_order::acq_rel);
-    // First shmem_array_length number of threads exclusive scan in shared memory
-    auto local_x = shrd_mem[relative_thread_id];
+    // First shmem_array_length number of threads inclusive scan in shared memory.
+    // The participating work-items can span several sub-groups, which are not
+    // guaranteed to run in lockstep, so all reads of a step must complete
+    // before any work-item overwrites its element.
+    const bool scan_participant = relative_thread_id < shmem_array_length;
+    OutType local_x{};
+    if (scan_participant)
+      local_x = shrd_mem[relative_thread_id];
     for (__acpp_int32 j = 1; j < shmem_array_length; j *= 2) {
-      __acpp_int32 next_id = relative_thread_id - j;
-      if (next_id >= 0 && j <= relative_thread_id) {
-        if (relative_thread_id < shmem_array_length) {
-          auto other_x = shrd_mem[next_id];
-          local_x = op(local_x, other_x);
-          shrd_mem[relative_thread_id] = local_x;
-        }
+      const bool active = scan_participant && j <= relative_thread_id;
+      OutType other_x{};
+      if (active)
+        other_x = shrd_mem[relative_thread_id - j];
+      __acpp_sscp_work_group_barrier(__acpp_sscp_memory_scope::work_group,
+                                     __acpp_sscp_memory_order::acq_rel);
+      if (active) {
+        local_x = op(local_x, other_x);
+        shrd_mem[relative_thread_id] = local_x;
       }
       __acpp_sscp_work_group_barrier(__acpp_sscp_memory_scope::work_group,
                                      __acpp_sscp_memory_order::acq_rel);
