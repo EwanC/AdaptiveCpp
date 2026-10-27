@@ -869,8 +869,13 @@ result vk_queue::submit_sscp_kernel_from_code_object(
       return nullptr;
     }
 
-    bool has_dead_arg_elimination =
-        exec_obj->supported_backend_kernel_names().size() == 1;
+    // Dead argument elimination is only applied by the JIT when a single kernel
+    // was requested. Don't infer this from the kernels in the binary, as
+    // kernels clspv cannot compile may have been removed from a module that
+    // was compiled for multiple kernels.
+    std::vector<std::string> requested_kernels;
+    adaptivity_engine.select_image_and_kernels(&requested_kernels);
+    bool has_dead_arg_elimination = requested_kernels.size() == 1;
     glue::jit::load_jit_output_metadata(*exec_obj, has_dead_arg_elimination,
                                         binary_configuration_id);
 
