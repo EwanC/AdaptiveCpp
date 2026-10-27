@@ -43,6 +43,18 @@ private:
   void applyKernelProperties(llvm::Function *F);
   void removeKernelProperties(llvm::Function *F);
 
+  // Options passed to clspv, apart from the input and output files
+  std::vector<std::string> getClspvArgs() const;
+  // Compiles M with clspv, and on success stores the SPIR-V binary in Out.
+  // ExitCode is set to the exit code of clspv. Returns false if an error
+  // other than clspv failing occurred, e.g. if temporary files could not be
+  // created.
+  bool runClspv(const llvm::Module &M, std::string &Out, int &ExitCode);
+  // Compiles each kernel of M separately with clspv, and removes the kernels
+  // clspv fails on from M. Returns true if kernels were removed, and other
+  // kernels remain in M.
+  bool removeKernelsClspvFailsOn(llvm::Module &M);
+
   std::vector<std::string> KernelNames;
   unsigned DynamicLocalMemSize = 0;
   std::string MaxPushConstantSize;

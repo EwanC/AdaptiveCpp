@@ -132,3 +132,22 @@ now have one.
 ### ConstantAddrSpacePass
 
 Module pass for ensuring constant global variables use the constant address space.
+
+## Kernels clspv fails on
+
+At `ACPP_ADAPTIVITY_LEVEL=0` all kernels of a translation unit are compiled
+into a single module, including kernels the application never launches on the
+Vulkan backend, e.g. because the device does not report an aspect they
+require. A single kernel that `clspv` fails on would then break the
+compilation of all kernels of the translation unit.
+
+Therefore, when `clspv` fails to compile a module containing more than one
+kernel, each kernel is compiled separately to find the kernels `clspv` fails
+on. These kernels are removed from the module, which is then compiled again.
+A warning is reported for each removed kernel, and launching it fails with an
+unknown kernel error.
+
+The separate compilations run in parallel, with up to one `clspv` process per
+hardware thread. A `clspv` process that does not finish within
+`ACPP_S2_CLSPV_ISOLATION_TIMEOUT` seconds (default: 120, 0 disables the
+timeout) is killed, and its kernel is treated as one `clspv` fails on.

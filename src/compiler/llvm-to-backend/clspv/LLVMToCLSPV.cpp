@@ -23,8 +23,12 @@
 #include "hipSYCL/compiler/sscp/IRConstantReplacer.hpp"
 #include "hipSYCL/compiler/utils/LLVMUtils.hpp"
 #include "hipSYCL/glue/llvm-sscp/jit-reflection/queries.hpp"
+#include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringExtras.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/CallingConv.h>
@@ -40,10 +44,20 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Program.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <cerrno>
+#include <signal.h>
+#include <sys/wait.h>
+#endif
 
 namespace hipsycl {
 namespace compiler {
@@ -159,6 +173,121 @@ void rewriteZeroSizeArrayGEPs(llvm::Module &M) {
   }
 }
 
+bool isKernelDefinition(const llvm::Function &F) {
+  return !F.isDeclaration() &&
+         F.getCallingConv() == llvm::CallingConv::SPIR_KERNEL;
+}
+
+// Removes the functions and global variables that are no longer used, e.g.
+// after kernels were removed from the module.
+void removeUnusedGlobals(llvm::Module &M) {
+  // GlobalDCEPass does not use any analyses
+  llvm::ModuleAnalysisManager MAM;
+  llvm::GlobalDCEPass{}.run(M, MAM);
+}
+
+// Creates a copy of M that only contains the given kernel and the functions
+// and global variables it uses.
+std::unique_ptr<llvm::Module> cloneKernel(const llvm::Module &M,
+                                          llvm::StringRef Kernel) {
+  // The other kernels are created as declarations without uses, which are
+  // removed together with everything only they use.
+  llvm::ValueToValueMapTy VMap;
+  std::unique_ptr<llvm::Module> Clone =
+      llvm::CloneModule(M, VMap, [&](const llvm::GlobalValue *GV) {
+        auto *F = llvm::dyn_cast<llvm::Function>(GV);
+        return !F || !isKernelDefinition(*F) || F->getName() == Kernel;
+      });
+  removeUnusedGlobals(*Clone);
+  return Clone;
+}
+
+// A clspv process compiling a single kernel, of which the output is discarded
+struct ClspvJob {
+  std::string Kernel;
+  std::string InputFile;
+  std::string OutputFile;
+  llvm::sys::ProcessInfo Process;
+  std::chrono::steady_clock::time_point StartTime;
+};
+
+void removeJobFiles(const ClspvJob &Job) {
+  (void)llvm::sys::fs::remove(Job.InputFile);
+  (void)llvm::sys::fs::remove(Job.OutputFile);
+}
+
+// Writes M to a temporary file and starts clspv on it, without waiting for
+// clspv to finish.
+bool startClspvJob(const llvm::Module &M, const std::vector<std::string> &Args,
+                   ClspvJob &Job) {
+  int InputFD = 0;
+  llvm::SmallString<128> InputFile;
+  if (llvm::sys::fs::createTemporaryFile("acpp-sscp-clspv", "bc", InputFD,
+                                         InputFile))
+    return false;
+  Job.InputFile = InputFile.str().str();
+  {
+    llvm::raw_fd_ostream InputStream{InputFD, true};
+    llvm::WriteBitcodeToFile(M, InputStream);
+  }
+
+  llvm::SmallString<128> OutputFile;
+  if (llvm::sys::fs::createTemporaryFile("acpp-sscp-clspv", "spv", OutputFile))
+    return false;
+  Job.OutputFile = OutputFile.str().str();
+
+  std::string CLSPV = ACPP_CLSPV_PATH;
+  std::string OutputArg = "-o=" + Job.OutputFile;
+  llvm::SmallVector<llvm::StringRef, 16> Invocation{CLSPV};
+  for (const auto &A : Args)
+    Invocation.push_back(A);
+  Invocation.push_back(OutputArg);
+  Invocation.push_back(Job.InputFile);
+  HIPSYCL_DEBUG_INFO << "LLVMToCLSPV: Invoking " << llvm::join(Invocation, " ")
+                     << "\n";
+
+  // Discard the output of clspv, the kernels it fails on are reported instead
+  std::optional<llvm::StringRef> Redirects[] = {
+      llvm::StringRef{}, llvm::StringRef{}, llvm::StringRef{}};
+  bool ExecutionFailed = false;
+  Job.Process = llvm::sys::ExecuteNoWait(
+      CLSPV, Invocation, std::nullopt, Redirects, 0, nullptr, &ExecutionFailed);
+  Job.StartTime = std::chrono::steady_clock::now();
+  return !ExecutionFailed;
+}
+
+// Returns the exit code of the process if it has finished, without blocking.
+std::optional<int> pollProcess(const llvm::sys::ProcessInfo &Process) {
+#ifdef _WIN32
+  llvm::sys::ProcessInfo Result = llvm::sys::Wait(Process, 0u);
+  if (Result.Pid == 0)
+    return std::nullopt;
+  return Result.ReturnCode;
+#else
+  // Not llvm::sys::Wait, as it replaces the SIGALRM handler of the
+  // application, even for a non-blocking wait.
+  int Status = 0;
+  pid_t Pid = ::waitpid(Process.Pid, &Status, WNOHANG);
+  if (Pid == 0 || (Pid == -1 && errno == EINTR))
+    return std::nullopt;
+  if (Pid == -1)
+    return -1;
+  return WIFEXITED(Status) ? WEXITSTATUS(Status) : -2;
+#endif
+}
+
+void killProcess(const llvm::sys::ProcessInfo &Process) {
+#ifdef _WIN32
+  // Terminates the process if it does not finish within a second
+  llvm::sys::Wait(Process, 1u);
+#else
+  ::kill(Process.Pid, SIGKILL);
+  int Status = 0;
+  while (::waitpid(Process.Pid, &Status, 0) == -1 && errno == EINTR) {
+  }
+#endif
+}
+
 } // namespace
 
 LLVMToCLSPVTranslator::LLVMToCLSPVTranslator(const std::vector<std::string> &KN)
@@ -254,8 +383,33 @@ bool LLVMToCLSPVTranslator::toBackendFlavor(llvm::Module &M, PassHandler &PH) {
   return true;
 }
 
-bool LLVMToCLSPVTranslator::translateToBackendFormat(
-    llvm::Module &FlavoredModule, std::string &out) {
+std::vector<std::string> LLVMToCLSPVTranslator::getClspvArgs() const {
+  std::vector<std::string> Args{"-x=ir", "--physical-storage-buffers",
+                                "-spv-version=1.5", "--arch=spir64",
+                                "-long-vector"};
+
+  // Workaround for the Qualcomm Adreno driver on Android that struggles to
+  // consume SPIR-V where the physical pointer arguments are passed in a push
+  // constant with non zero member index. To avoid this pass each argument as
+  // its own uniform buffer.
+  if (DeviceName.find("Adreno") != std::string::npos) {
+    Args.push_back("--pod-ubo");
+    Args.push_back("--cluster-pod-kernel-args=0");
+  }
+
+  if (!MaxPushConstantSize.empty()) {
+    Args.push_back("-max-pushconstant-size=" + MaxPushConstantSize);
+  }
+
+  if (!MaxUniformBufferRange.empty()) {
+    Args.push_back("-max-ubo-size=" + MaxUniformBufferRange);
+  }
+
+  return Args;
+}
+
+bool LLVMToCLSPVTranslator::runClspv(const llvm::Module &M, std::string &Out,
+                                     int &ExitCode) {
   bool Create = true;
   auto consumeError = [&](std::error_code EC) {
     if (EC) {
@@ -295,35 +449,14 @@ bool LLVMToCLSPVTranslator::translateToBackendFormat(
   {
     llvm::raw_fd_ostream InputStream{InputFD, true};
 
-    llvm::WriteBitcodeToFile(FlavoredModule, InputStream);
+    llvm::WriteBitcodeToFile(M, InputStream);
     InputStream.flush();
   }
 
   std::string CLSPV = ACPP_CLSPV_PATH;
 
-  llvm::SmallVector<std::string> Args{"-x=ir",
-                                      "--physical-storage-buffers",
-                                      "-spv-version=1.5",
-                                      "--arch=spir64",
-                                      "-long-vector",
-                                      "-o=" + OutputFileName};
-
-  // Workaround for the Qualcomm Adreno driver on Android that struggles to
-  // consume SPIR-V where the physical pointer arguments are passed in a push
-  // constant with non zero member index. To avoid this pass each argument as
-  // its own uniform buffer.
-  if (DeviceName.find("Adreno") != std::string::npos) {
-    Args.push_back("--pod-ubo");
-    Args.push_back("--cluster-pod-kernel-args=0");
-  }
-
-  if (!MaxPushConstantSize.empty()) {
-    Args.push_back("-max-pushconstant-size=" + MaxPushConstantSize);
-  }
-
-  if (!MaxUniformBufferRange.empty()) {
-    Args.push_back("-max-ubo-size=" + MaxUniformBufferRange);
-  }
+  std::vector<std::string> Args = getClspvArgs();
+  Args.push_back("-o=" + OutputFileName);
 
   llvm::SmallVector<llvm::StringRef, 16> Invocation{CLSPV};
   for (const auto &A : Args)
@@ -337,13 +470,9 @@ bool LLVMToCLSPVTranslator::translateToBackendFormat(
   }
   HIPSYCL_DEBUG_INFO << "LLVMToCLSPV: Invoking " << ArgString << "\n";
 
-  int R = executeAndWait(CLSPV, Invocation);
-
-  if (R != 0) {
-    this->registerError("LLVMToCLSPV: clspv invocation failed with exit code " +
-                        std::to_string(R));
-    return false;
-  }
+  ExitCode = executeAndWait(CLSPV, Invocation);
+  if (ExitCode != 0)
+    return true;
 
   auto ReadResult = llvm::MemoryBuffer::getFile(OutputFileName);
 
@@ -353,7 +482,105 @@ bool LLVMToCLSPVTranslator::translateToBackendFormat(
     return false;
   }
 
-  out = ReadResult->get()->getBuffer();
+  Out = ReadResult->get()->getBuffer();
+
+  return true;
+}
+
+bool LLVMToCLSPVTranslator::removeKernelsClspvFailsOn(llvm::Module &M) {
+  std::vector<std::string> Kernels;
+  for (auto &F : M)
+    if (isKernelDefinition(F))
+      Kernels.push_back(F.getName().str());
+  if (Kernels.size() < 2)
+    return false;
+
+  HIPSYCL_DEBUG_WARNING << "LLVMToCLSPV: clspv failed to compile a module with "
+                        << Kernels.size()
+                        << " kernels, compiling the kernels separately to "
+                           "find the ones it fails on\n";
+
+  const std::vector<std::string> Args = getClspvArgs();
+  // A kernel clspv hangs on is treated like a kernel it fails on. 0 disables
+  // the timeout.
+  const std::chrono::seconds Timeout{getEnvironmentVariableOrDefault<unsigned>(
+      "clspv_isolation_timeout", 120)};
+  const std::size_t MaxProcesses =
+      std::max(1u, std::thread::hardware_concurrency());
+
+  // Pairs of kernel name and the reason why it is removed
+  std::vector<std::pair<std::string, std::string>> FailingKernels;
+  std::vector<ClspvJob> Jobs;
+  std::size_t NumStarted = 0;
+  while (NumStarted < Kernels.size() || !Jobs.empty()) {
+    while (NumStarted < Kernels.size() && Jobs.size() < MaxProcesses) {
+      ClspvJob Job;
+      Job.Kernel = Kernels[NumStarted++];
+      if (startClspvJob(*cloneKernel(M, Job.Kernel), Args, Job))
+        Jobs.push_back(std::move(Job));
+      else
+        removeJobFiles(Job);
+    }
+
+    for (auto It = Jobs.begin(); It != Jobs.end();) {
+      std::string FailureReason;
+      if (std::optional<int> R = pollProcess(It->Process)) {
+        if (*R != 0)
+          FailureReason =
+              "clspv failed to compile it with exit code " + std::to_string(*R);
+      } else if (Timeout.count() > 0 &&
+                 std::chrono::steady_clock::now() - It->StartTime > Timeout) {
+        killProcess(It->Process);
+        FailureReason = "clspv did not finish compiling it within " +
+                        std::to_string(Timeout.count()) + " seconds";
+      } else {
+        ++It;
+        continue;
+      }
+
+      if (!FailureReason.empty())
+        FailingKernels.emplace_back(It->Kernel, FailureReason);
+      removeJobFiles(*It);
+      It = Jobs.erase(It);
+    }
+
+    if (!Jobs.empty())
+      std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+
+  if (FailingKernels.empty() || FailingKernels.size() == Kernels.size())
+    return false;
+
+  for (const auto &[Kernel, Reason] : FailingKernels) {
+    HIPSYCL_DEBUG_WARNING << "LLVMToCLSPV: Removing kernel " << Kernel
+                          << " from the module, as " << Reason << "\n";
+    llvm::Function *F = M.getFunction(Kernel);
+    if (!F->use_empty())
+      F->replaceAllUsesWith(llvm::PoisonValue::get(F->getType()));
+    F->eraseFromParent();
+  }
+  removeUnusedGlobals(M);
+  return true;
+}
+
+bool LLVMToCLSPVTranslator::translateToBackendFormat(
+    llvm::Module &FlavoredModule, std::string &out) {
+  int R = 0;
+  if (!runClspv(FlavoredModule, out, R))
+    return false;
+
+  // At ACPP_ADAPTIVITY_LEVEL=0 all kernels of a translation unit are compiled
+  // into one module, including kernels the application never launches on the
+  // Vulkan backend. A kernel clspv fails on must not break the other kernels.
+  if (R != 0 && removeKernelsClspvFailsOn(FlavoredModule) &&
+      !runClspv(FlavoredModule, out, R))
+    return false;
+
+  if (R != 0) {
+    this->registerError("LLVMToCLSPV: clspv invocation failed with exit code " +
+                        std::to_string(R));
+    return false;
+  }
 
   return true;
 }
