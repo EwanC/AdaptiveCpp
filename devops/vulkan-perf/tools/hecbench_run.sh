@@ -1,15 +1,16 @@
 #!/bin/bash
-# Run one HeCBench SYCL benchmark on the four comparison devices.
+# Run one HeCBench SYCL benchmark on the comparison devices.
 # Each device gets one warm-up run (JIT) and one measured run.
 #
-# Build first (from the HeCBench src/<bench>-sycl directory), once per variant:
+# Build first with hecbench_build.sh (or by hand, from src/<bench>-sycl):
 #   make CC=acpp VENDOR=AdaptiveCpp EXTRA_CFLAGS="--acpp-targets=generic" GPU=yes && cp main <bench>-gpu
 #   make clean
 #   make CC=acpp VENDOR=AdaptiveCpp EXTRA_CFLAGS="--acpp-targets=generic" GPU=no  && cp main <bench>-cpu
+# hecbench_suite.sh runs the full benchmark set with the recorded arguments.
 #
 # usage: HECBENCH=~/HeCBench OUT=/tmp/runs DEVICES="..." hecbench_run.sh <bench> [args...]
-# DEVICES entries are "<gpu|cpu>|<ACPP_VISIBILITY_MASK>|<tag>"; adjust for
-# your hardware (e.g. "gpu|omp;cuda|cuda" "gpu|omp;vk:NVIDIA|nvvk").
+# DEVICES entries are "<gpu|cpu|gpu-cuda>|<ACPP_VISIBILITY_MASK>|<tag>"; adjust for
+# your hardware (e.g. "gpu-cuda|omp;cuda|cuda" "gpu|omp;vk:NVIDIA|nvvk").
 HECBENCH=${HECBENCH:-~/Development/HeCBench}
 OUT=${OUT:-/tmp/hecbench-runs}
 DEVICES=${DEVICES:-"gpu|omp;hip|hip gpu|omp;vk:RADV|radv cpu|omp|omp cpu|omp;vk:llvmpipe|lvp"}
