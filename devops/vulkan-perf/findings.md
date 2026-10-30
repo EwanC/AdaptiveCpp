@@ -12,6 +12,17 @@ The document is designed to be extended from multiple machines. Every finding
 has a stable ID; new benchmark runs are appended to the [run log](#run-log)
 and then referenced from the finding's **Evidence** table with a verdict.
 
+Documents derived from this one (keep them in sync when a finding changes):
+
+* [`../bug-reports/`](../bug-reports/README.md): one upstream-ready issue
+  draft per bug (BUG-n).
+* [`../performance-improvements/`](../performance-improvements/vulkan-performance-opportunities.md):
+  every improvement opportunity (IMPR-n) with evidence, proposal and how to
+  validate it.
+* [`../fundamental-limitations/`](../fundamental-limitations/vulkan-performance-limitations.md):
+  user-facing guide to what performance to expect and how to write code
+  for the Vulkan backend.
+
 ## How to contribute a run
 
 1. Add a machine entry to [Machines](#machines) (`M<n>`) if it isn't there.
@@ -56,8 +67,10 @@ and then referenced from the finding's **Evidence** table with a verdict.
   (`hecbench_build.sh` with `ACPP_CUDA`) and note that its LLVM version may
   differ from the Vulkan build's.
 * SYCL event profiling also aborts on the OpenCL backend on M2
-  (`Operation not profiled: No execution end timestamp available`), so
-  wall-clock timing is the only method that works across all backends.
+  (`Operation not profiled: No execution end timestamp available`; the
+  backend has no profiling support but accepts `enable_profiling`,
+  [BUG-12](#bug-12)), so wall-clock timing is the only method that works
+  across all backends.
 * The MTL iGPU's clock state can change a kernel's time by up to 2× between
   batches (e.g. right after using the other GPU): interleave A/B runs,
   discard the first run of each batch and compare steady states.
@@ -91,6 +104,8 @@ that build's `acpp`; `run_tool.sh` picks it up via a binary suffix).
 | `hecbench_build.sh` / `hecbench_suite.sh` / `hecbench_parse.py` | Build gpu/cpu(/gpu-cuda) variants; run the recorded benchmark set and arguments; extract metrics and Vulkan/native ratios |
 | `clspv_shim.c` + `clspv_wrapper.sh` | `LD_PRELOAD` shim that re-runs AdaptiveCpp's clspv invocation with extra flags (`CLSPV_EXTRA`) without rebuilding anything |
 | `patch_barrier.sh` | A/B: rewrite the `OpControlBarrier` memory semantics in an app's cached clspv SPIR-V (IMPR-14) |
+| `uguide.cpp` | Checks for user-level workarounds: `x*a+b` vs `sycl::fma` chain, `a/x` vs `a*native::recip(x)` chain, serial loop plain vs `#pragma unroll 8` vs manual ×8 (IMPR-5, IMPR-11, IMPR-12, IMPR-16) |
+| `jit_unroll.cpp` | The serial loop with `#pragma unroll 8` applied only on the Vulkan backend through JIT reflection (`compile_if_else` on `reflection_query::runtime_backend`) |
 
 ### Correctness gate for HeCBench data
 
@@ -164,7 +179,7 @@ still works because gdb starts the program as its child.
 
 ## Run log
 
-### R1 — M1, nbody-sycl (HeCBench), 2026-10-29
+### <a id="r1"></a>R1 — M1, nbody-sycl (HeCBench), 2026-10-29
 Binaries: `nbody-gpu` (gpu_selector), `nbody-cpu` (cpu_selector),
 built with `--acpp-targets=generic`. `./nbody-<x> 16000 30`, warm cache, GFLOP/s:
 
@@ -181,7 +196,7 @@ nbody reports `FAIL` on RADV at 30 steps; energies are identical to HIP
 (172663). The benchmark uses an absolute tolerance of 1e-3 on a value of
 ~1.7e5, which is below float ULP — benchmark artefact, not a Vulkan bug.
 
-### R2 — M1, `tools/mb.cpp` (n=16000), 2026-10-29
+### <a id="r2"></a>R2 — M1, `tools/mb.cpp` (n=16000), 2026-10-29
 Wall clock, steady state:
 
 | Metric | HIP | RADV | OpenMP | llvmpipe |
@@ -196,7 +211,7 @@ Wall clock, steady state:
 | nbody update kernel + wait | 63 µs | 235 µs | 62 µs | 158 µs |
 | `single_task` serial sum of 16000 floats + wait | 1.17 ms | 1.68 ms | 0.06 ms | 0.11 ms |
 
-### R3 — M1, `tools/bw.cpp`, 2026-10-29
+### <a id="r3"></a>R3 — M1, `tools/bw.cpp`, 2026-10-29
 µs per kernel for 50 back-to-back dependent kernels (no waits between):
 
 | Buffer | HIP | RADV | OpenMP | llvmpipe |
@@ -214,7 +229,7 @@ Wall clock, steady state:
 llvmpipe 64 MB with `LP_NUM_THREADS`=4/8/16: 10.0/16.6/16.4 GB/s.
 OpenMP with `OMP_NUM_THREADS=8`: 33.9 GB/s.
 
-### R4 — M1, syscalls / sampling, 2026-10-29
+### <a id="r4"></a>R4 — M1, syscalls / sampling, 2026-10-29
 `strace -f -c ./lat K M` (net of the K=M=0 baseline):
 * RADV, 10000 launches: ~3 ioctl per launch.
 * RADV, 1000 4-byte D2H copies: ~11 ioctl + 1.4 mmap + 1.1 munmap per copy.
@@ -229,7 +244,7 @@ gdb sampling of the submitting thread (`samp.sh`, ~200 samples):
 * llvmpipe launch loop: 72% blocked in `get_command_buffer` waiting for the
   24-entry command-buffer pool to drain (device-side per-submit cost).
 
-### R5 — M1, codegen inspection, 2026-10-29
+### <a id="r5"></a>R5 — M1, codegen inspection, 2026-10-29
 Compared RADV ISA (`RADV_DEBUG=shaders`) with HIP ISA for the same JIT'd
 nbody kernels:
 
@@ -243,7 +258,7 @@ nbody kernels:
 All SPIR-V float ops carry `NoContraction` although the input LLVM IR carries
 `contract` fast-math flags.
 
-### R6 — M1, HeCBench suite, 2026-10-29
+### <a id="r6"></a>R6 — M1, HeCBench suite, 2026-10-29
 Built with `tools/hecbench_run.sh` instructions (`--acpp-targets=generic`),
 warm-up run discarded, one measured run per device. Bold = Vulkan worse than
 the native backend on the same hardware by >20%. Ratio columns are
@@ -282,7 +297,7 @@ Notes:
 * memcpy latencies at 1–2 MB on RADV are erratic (H2D 1 MB 2.4 ms but 2 MB
   0.8 ms), consistent with per-copy allocation cost of large staging BOs.
 
-### R7 — M1, HeCBench correctness triage, 2026-10-29
+### <a id="r7"></a>R7 — M1, HeCBench correctness triage, 2026-10-29
 Correctness of every pair in R6 was confirmed by the benchmark's own check
 (bfs, floydwarshall, gaussian, binomial, mandelbrot, softmax, histogram,
 atomicReduction, su3 via `assert`), by comparing printed results
@@ -292,7 +307,7 @@ devices), or by building a print variant and diffing between devices
 bit-identical; **OpenMP differs**, so pathfinder OpenMP data is excluded).
 Benchmarks excluded entirely are listed in [BUG-5](#bug-5).
 
-### R8 — M1, su3 ISA inspection, 2026-10-29
+### <a id="r8"></a>R8 — M1, su3 ISA inspection, 2026-10-29
 Kernel computes `size_t i = id/36; j = (id%36)/9; k = (id%9)/3; l = id%3`.
 
 | | HIP | RADV |
@@ -301,7 +316,7 @@ Kernel computes `size_t i = id/36; j = (id%36)/9; k = (id%9)/3; l = id%3`.
 | FP64 complex multiply-add | 6 `v_fma_f64` | 12 `v_mul_f64` + 10 `v_add_f64` (no FMA) |
 | Memory | 6 `global_load_b128` | 6 `global_load_b128` |
 
-### R9 — M2, `tools/mb.cpp` (n=16000), 2026-10-29
+### <a id="r9"></a>R9 — M2, `tools/mb.cpp` (n=16000), 2026-10-29
 `tools/run_tool.sh mb 16000`: wall clock, median of 3 runs after a warm-up
 run (µs unless noted). Columns are grouped by hardware: MTL iGPU, Ada dGPU,
 CPU.
@@ -331,7 +346,7 @@ CPU.
   n than on CUDA (n=256000: 615 vs 221 µs), and ~3.1× faster on ANV than
   on OpenCL (1521 vs 484 µs).
 
-### R10 — M2, `tools/bw.cpp`, 2026-10-29
+### <a id="r10"></a>R10 — M2, `tools/bw.cpp`, 2026-10-29
 µs per kernel for 50 back-to-back dependent kernels, median of 3:
 
 | Buffer | OpenCL MTL | Vulkan MTL | CUDA Ada | Vulkan Ada | OpenCL CPU | llvmpipe | OpenMP |
@@ -346,7 +361,7 @@ CPU.
 `CL_CONFIG_CPU_TBB_NUM_WORKERS`): llvmpipe 20/17/18/21/25/29 GB/s, OpenMP
 47/49/45/35/44/44 GB/s, OpenCL CPU 32/45/50/53/53/52 GB/s.
 
-### R11 — M2, host↔device copies, 2026-10-29/30
+### <a id="r11"></a>R11 — M2, host↔device copies, 2026-10-29/30
 `tools/xfer.cpp` (memcpy + `wait()`, pageable host memory, 2 runs; bold =
 D2H through uncached staging memory, [IMPR-13](#impr-13)):
 
@@ -381,7 +396,7 @@ submitting thread spends 79% in `vk_node_event::wait` and 16% in
 thread spends ~40% of its time in `cleanup_staging_buffers` →
 `vk_staging_allocation_map::erase` (`vkFreeMemory`).
 
-### R12 — M2, `tools/idx.cpp` (16M items, 64 iterations) and IR, 2026-10-29/30
+### <a id="r12"></a>R12 — M2, `tools/idx.cpp` (16M items, 64 iterations) and IR, 2026-10-29/30
 Time per kernel (ms), 2 runs:
 
 | | OpenCL MTL | Vulkan MTL | CUDA Ada | Vulkan Ada | OpenCL CPU | llvmpipe | OpenMP |
@@ -404,7 +419,7 @@ Time per kernel (ms), 2 runs:
   `udiv i64` survives (the dead `assume`s are dropped later by
   `RemoveUnusedIntrinsicsPass`).
 
-### R13 — M2, `tools/prof.cpp`, BUG-2 and BUG-3 checks, 2026-10-29/30
+### <a id="r13"></a>R13 — M2, `tools/prof.cpp`, BUG-2 and BUG-3 checks, 2026-10-29/30
 `prof 64` (in-order profiling queue, every event waited on; µs, 2 runs):
 
 | Device | Wall clock | Event profiling | Wall / profiled |
@@ -430,7 +445,7 @@ The kernel is a 64-step `x = x*1.0001f + 0.5f` chain: Vulkan Ada takes
   then loads *all* backends. `omp;vk:NoSuchDevice` loads Vulkan with no
   devices and no message.
 
-### R14 — M2, HeCBench suite, 2026-10-29/30
+### <a id="r14"></a>R14 — M2, HeCBench suite, 2026-10-29/30
 `tools/hecbench_suite.sh` (R6's arguments; bfs on two generated graphs),
 warm-up run discarded, one measured run per device; the GPU devices were
 run a second time (pass 2). Ratios are Vulkan/native time (>1 means Vulkan
@@ -495,7 +510,7 @@ Notes:
 * RADV was 2.1× faster than HIP on pathfinder on M1, but both Vulkan
   drivers are slower than native on M2.
 
-### R15 — M2, HeCBench correctness triage, 2026-10-30
+### <a id="r15"></a>R15 — M2, HeCBench correctness triage, 2026-10-30
 * Self-checks pass on every device that ran for bfs (both graphs),
   floydwarshall, gaussian, binomial, mandelbrot, histogram and
   atomicReduction; su3's `assert`s hold everywhere; nbody reports the R1
@@ -526,7 +541,7 @@ Notes:
   runtime is re-initialised within the process; lud segfaults on the OpenCL
   CPU; CUDA hangs in lud.
 
-### R16 — M2, codegen experiments, 2026-10-30
+### <a id="r16"></a>R16 — M2, codegen experiments, 2026-10-30
 1. nbody acceleration kernel ISA (`INTEL_DEBUG=cs`, IGC dump):
 
    | | OpenCL (IGC) | Vulkan (ANV) |
@@ -576,6 +591,77 @@ Notes:
    `vpgatherqd` (64-bit addresses), the store of `b[i]` is 8 scalar stores
    via `vextractps`/`vpextrq`/`vmovss`.
 
+### <a id="r17"></a>R17 — M2, minimal reproducers for the bug reports, 2026-10-30
+Each report in [`../bug-reports/`](../bug-reports/) contains its reproducer and
+the verbatim output; highlights:
+* BUG-2: with every event waited on, the validation layer reports nothing
+  (NVIDIA, llvmpipe); dropping the events reproduces VUID-00793.
+* BUG-6: `atomic_ref<double>::fetch_add` on 1024 work-items: ANV `-nan`,
+  llvmpipe aborts in its LLVM back end, NVIDIA 1024. The Vulkan backend
+  reports `aspect::fp64 == aspect::atomic64 == false` on all three devices.
+* BUG-7/BUG-11: a 40-line scan up-sweep with a `local_accessor<char>` makes
+  clspv abort on all three Vulkan drivers; each of 3 launches re-runs the JIT
+  (~1.74 s each) and the kernel never runs; OpenCL and CUDA compile once and
+  give the right result. `llvm-reduce` on the IR dumped from scan-sycl gives an
+  8-line module that aborts in `clspv-opt --passes=simplify-pointer-bitcast`:
+  an `i8` GEP into an `[N x i32]` global at a byte offset that is not a
+  multiple of 4 (1, 2, 3, 5, −1, −2, −3 abort; ±4 do not). Backtrace:
+  `SimplifyPointerBitcastPass::runOnImplicitGEP` →
+  `BitcastUtils::GetIdxsForTyFromOffset`.
+* BUG-10: a sub-group reduction kernel on ANV is compiled SIMD16 while 32 is
+  reported (`INTEL_DEBUG=cs`); 16 of 256 work-items see
+  `sub_group::get_local_range() == -224`. With `vk/per-kernel-subgroup-size`
+  the kernel is SIMD32 and correct.
+* BUG-12/13/14 (OpenCL backend): see the reports.
+
+### <a id="r18"></a>R18 — M2, user-level workarounds and `sycl::native` functions, 2026-10-30
+Run to check the advice in
+[`../fundamental-limitations/`](../fundamental-limitations/) before giving it.
+`tools/uguide.cpp`: wall clock, median of 15 launches after a warm-up, second
+of two runs with a fresh private JIT cache, `performance` power profile (ms):
+
+| | OpenCL MTL | Vulkan MTL | CUDA Ada | Vulkan Ada | OpenCL CPU | llvmpipe |
+|---|---|---|---|---|---|---|
+| 1024-step chain `x = x*a + b` (4M work-items) | 4.80 | 8.51 | 2.77 | 6.83 | 35.2 | 533 |
+| same with `x = sycl::fma(x, a, b)` | 4.43 | **351** | 2.76 | **499** | 36.4 | **5333** |
+| 128-step chain `x = a / (x + b)` | 4.01 | 3.49 | 5.13 | 4.13 | 16.1 | 102 |
+| same with `x = a * sycl::native::recip(x + b)` | 2.13 | 2.33 | 4.03 | 2.65 | 18.4 | 98 |
+| `single_task` serial sum of 65536 floats | 4.72 | 6.41 | 0.91 | 3.15 | 0.027 | 1.05 |
+| same with `#pragma unroll 8` | 1.98 | 2.56 | **2.43** | 1.14 | 0.038 | 0.28 |
+| same, unrolled ×8 by hand (same summation order) | 1.83 | 2.77 | 2.43 | 1.14 | 0.094 | 0.22 |
+
+* Between the two runs the GPU results agree within 16%, except the two
+  unrolled serial sums on Vulkan Ada (2.31 / 2.88 ms in the first run, with
+  an empty JIT cache). CPU results vary more (llvmpipe: up to 1.8× for the
+  hand-unrolled sum, 1.3× for the division chain).
+* The same binary built with `-ffast-math`: no change on the GPUs (`x*a+b`
+  NVIDIA 6.80 ms, ANV 8.67 ms; `sycl::fma` unchanged).
+* SPIR-V of one `sycl::fma` in a `single_task` (`spirv-dis` of the JIT
+  cache): 629 lines with ~200 integer instructions; `GLSL.std.450 Fma` is only
+  reached when an input is NaN or infinite, finite inputs take a software
+  path. `sycl::mad` gives `OpFMul` + `OpFAdd`, both `NoContraction`, i.e. the
+  same code as `a*b + c`.
+* `VK_KHR_shader_fma`: NVIDIA exposes it (`shaderFmaFloat16/32/64 = true`),
+  ANV and llvmpipe (Mesa 26.0.8) do not. clspv has `--spv-khr-fma=16,32,64`
+  but only lowers `fma` to `OpFmaKHR` when every enabled float width is
+  listed (`lib/Compiler.cpp`; fp16 and fp64 are enabled by default). Through
+  `clspv_shim.c` on NVIDIA: `--spv-khr-fma=32` changes only the NaN/Inf path
+  (chain still 499.5 ms); `--spv-khr-fma=16,32,64` gives a single `OpFmaKHR`
+  and the chain takes **4.49 ms** (`x*a+b` 6.80 ms, CUDA 2.77 ms). The device
+  feature was not enabled for this experiment; the backend printed
+  `unexpected SPIRV capability 6030` (BUG-6 behaviour) and ran the kernel.
+* `sycl::native` functions, one kernel each, on all three Vulkan drivers:
+  `native::divide` makes the kernel fail to load (`failed to parse spirv`;
+  [BUG-15](#bug-15)); `recip`, `rsqrt`, `sqrt`, `powr`, `exp`, `log` and `cos`
+  give the expected values.
+* `tools/jit_unroll.cpp`: `#pragma unroll 8` applied through
+  `AdaptiveCpp_jit::compile_if_else(reflect<reflection_query::runtime_backend>()
+  == (int)sycl::backend::vk, ...)` reaches only the Vulkan devices; the
+  others run the plain loop. Two runs: Vulkan Ada 1.01 / 1.10 ms (unrolled),
+  CUDA 0.89 ms (plain), llvmpipe 0.26–0.28 ms (unrolled), OpenCL CPU
+  0.03 ms (plain); the MTL iGPU varied too much between runs to compare
+  (Vulkan 3.3–5.3 ms unrolled, OpenCL 4.8–4.9 ms plain).
+
 ---
 
 ## Findings
@@ -589,7 +675,7 @@ Finding format: **Status**, **Summary**, **Mechanism** (code pointers),
 Things that are inherent to Vulkan, its SPIR-V environment, or the drivers,
 and which AdaptiveCpp can mitigate but not eliminate.
 
-#### FUND-1: Per-submission cost and kernel-resolved dependencies
+#### <a id="fund-1"></a>FUND-1: Per-submission cost and kernel-resolved dependencies
 * **Status:** confirmed (M1 RADV, M2 NVIDIA); on the M2 iGPU the native
   OpenCL backend pays a similar cost, so it is not Vulkan-specific there
 * **Summary:** Each Vulkan queue submission costs tens of µs host-side and
@@ -611,7 +697,7 @@ and which AdaptiveCpp can mitigate but not eliminate.
 | R14 | M2 | confirms | floydwarshall NVIDIA 1.27× CUDA (+10 µs/launch); gaussian 1.02× |
 | R9, R10, R14 | M2 | partial | ANV vs OpenCL on the same iGPU: 34 vs 42 µs pipelined, 81 vs 72 µs with `wait()`, 3.3 ioctl/launch; floydwarshall 0.96×, gaussian 1.02× — the native Intel stack is no faster |
 
-#### FUND-2: No scalar (SMEM) loads for wave-uniform pointer loads on RADV and ANV
+#### <a id="fund-2"></a>FUND-2: No scalar (SMEM) loads for wave-uniform pointer loads on RADV and ANV
 * **Status:** confirmed (M1 RADV, M2 ANV)
 * **Summary:** HIP's backend proves uniform loads are unclobbered and uses
   the scalar cache. Through SPIR-V `PhysicalStorageBuffer` pointers the
@@ -627,7 +713,10 @@ and which AdaptiveCpp can mitigate but not eliminate.
 * **Note:** partially addressable via IMPR-7; may require driver work. On
   M2 the NVIDIA `single_task` gap is explained by [IMPR-12](#impr-12) (no
   loop unrolling) instead; it is worth checking whether the HIP loop on M1
-  was also unrolled.
+  was also unrolled. Related on Intel: physical storage buffer addresses are
+  64-bit and Xe-LPG has no 64-bit integer ALU, so address arithmetic is
+  emulated (R16); [IMPR-6](#impr-6) can narrow the index arithmetic, but the
+  addresses themselves stay 64-bit.
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
@@ -636,7 +725,7 @@ and which AdaptiveCpp can mitigate but not eliminate.
 | R16 | M2 | confirms | ANV nbody accel: `p[j]` via `send(16) ... load, a64, d32, V3` per lane; IGC: one `load.ugm.d32x3t.a32 (1\|M0)` through a 32-bit stateful offset |
 | R9, R16 | M2 | partial | NVIDIA `single_task` 805 vs 226 µs, but the CUDA loop is unrolled ×8 with vector loads ([IMPR-12](#impr-12)); scalar loads not shown to matter |
 
-#### FUND-3: llvmpipe global-memory bandwidth roughly half of OpenMP
+#### <a id="fund-3"></a>FUND-3: llvmpipe global-memory bandwidth roughly half of OpenMP
 * **Status:** confirmed (M1, M2); mechanism verified on M2
 * **Summary:** Streaming kernels on llvmpipe reach ~16 GB/s vs ~32 GB/s for
   OpenMP; extra threads help little (M1: no gain beyond 8 threads; M2:
@@ -659,7 +748,7 @@ and which AdaptiveCpp can mitigate but not eliminate.
 | R14 | M2 | confirms | atomicReduction 29.7 vs 41.6 (OpenCL CPU) / 42.8 (OpenMP) GB/s |
 | R16 | M2 | confirms | mechanism: `GALLIVM_DEBUG=asm` shows gathers/scatters for PSB accesses |
 
-#### FUND-4: No host / shared USM
+#### <a id="fund-4"></a>FUND-4: No host / shared USM
 * **Status:** open (design)
 * **Summary:** `malloc_host` / `malloc_shared` throw because mapped
   pointers can't be used as physical pointers in kernels
@@ -673,7 +762,7 @@ and which AdaptiveCpp can mitigate but not eliminate.
 | code inspection | — | confirms | |
 | R11 | M2 | confirms | consequence measured: every host copy is staged ([IMPR-3](#impr-3), [IMPR-13](#impr-13)); no pinned path to fall back on |
 
-#### FUND-5: llvmpipe slower than OpenMP on most real kernels
+#### <a id="fund-5"></a>FUND-5: llvmpipe slower than OpenMP on most real kernels
 * **Status:** confirmed (M1, M2); mechanism only partly known (FUND-3)
 * **Summary:** Although llvmpipe beats OpenMP on nbody (compute-bound,
   regular), it is 1.8–5.6× slower on most HeCBench kernels, including ones
@@ -696,12 +785,31 @@ and which AdaptiveCpp can mitigate but not eliminate.
 | R14 | M2 | confirms | lvp/OMP: bfs 1.7, floydwarshall 4.6, gaussian 4.9, black-scholes 2.4, binomial 1.4, softmax 4.6, histogram 1.2–1.5, mandelbrot 1.2; pathfinder 0.91, nbody 0.94, su3 0.53 |
 | R14 | M2 | confirms | lvp/OpenCL CPU: gaussian 11, mandelbrot 6.6, histogram 2.1–6.5, floydwarshall 4.5, nbody 3.2, black-scholes 3.2, bfs (grid) 2.9, su3 2.2, binomial 1.6, atomicReduction 1.4; bfs (random) 0.30 and pathfinder 0.44 |
 
+#### <a id="fund-6"></a>FUND-6: Correctly rounded `fma` needs a software routine without `VK_KHR_shader_fma`
+* **Status:** open (M2)
+* **Summary:** SYCL 2020 requires `sycl::fma` to be correctly rounded. The
+  Vulkan spec only guarantees `GLSL.std.450 Fma` the precision of "OpFMul
+  followed by OpFAdd"; `OpFmaKHR` from `VK_KHR_shader_fma` is "Correctly
+  rounded". Devices without the extension (ANV and llvmpipe with Mesa
+  26.0.8) need a software routine. AdaptiveCpp currently uses the routine on
+  every device, including NVIDIA, which has the extension
+  ([IMPR-16](#impr-16)).
+* **Impact:** 1024-step dependent chain: ANV 351 ms with `sycl::fma` vs
+  8.5 ms with `x*a+b`; llvmpipe 5.3 s vs 0.53 s.
+* **User guidance:** Write `a*b + c` instead of `sycl::fma` unless the
+  correctly rounded result is needed.
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R18 | M2 | confirms | `uguide.cpp`; `vulkaninfo` (`VK_KHR_shader_fma` on NVIDIA only); Vulkan spec precision table |
+
 ### B. Improvable performance (actionable in AdaptiveCpp)
 
 Ordered roughly by expected impact on M1; IMPR-11 onwards were added from
 M2 and are not ranked.
 
-#### IMPR-1: One command buffer + one vkQueueSubmit per operation
+#### <a id="impr-1"></a>IMPR-1: One command buffer + one vkQueueSubmit per operation
 * **Status:** confirmed (M1, M2)
 * **Mechanism:** `vk_queue::submit_sscp_kernel_from_code_object`,
   `submit_memcpy`, etc. each call `begin_command_buffer` /
@@ -722,7 +830,7 @@ M2 and are not ranked.
 | R9, R10 | M2 | confirms | NVIDIA 17.6 µs host cost per launch vs 4.0 µs CUDA; llvmpipe ~79 futex per launch |
 | R14 | M2 | confirms | bfs on a 1999-level grid (2 kernels + 2 one-byte copies + 3 waits per level): kernel time NVIDIA 2.0× CUDA, ANV 2.3–2.7× OpenCL; floydwarshall NVIDIA 1.27× |
 
-#### IMPR-2: `get_command_buffer` queries the semaphore once per in-flight buffer
+#### <a id="impr-2"></a>IMPR-2: `get_command_buffer` queries the semaphore once per in-flight buffer
 * **Status:** open
 * **Mechanism:** The refresh loop in `vk_queue::get_command_buffer` calls
   `_semaphore.getCounterValue()` (an ioctl on RADV) inside the loop over
@@ -737,7 +845,7 @@ M2 and are not ranked.
 |-----|---------|---------|-------|
 | R4 | M1 | confirms | |
 
-#### IMPR-3: Host↔device copies slow (small 4-20×, 1-2 MB 10-50× vs HIP)
+#### <a id="impr-3"></a>IMPR-3: Host↔device copies slow (small 4-20×, 1-2 MB 10-50× vs HIP)
 * **Status:** confirmed (M1, M2)
 * **Mechanism:** Every copy to/from a host pointer:
   `vk_allocator::staging_allocate` (new VkBuffer + VkDeviceMemory) →
@@ -771,7 +879,7 @@ M2 and are not ranked.
 | R11 | M2 | confirms | llvmpipe: ~4 GB/s for ≥1 MB vs 25–67 GB/s OpenCL CPU / 21–49 GB/s OpenMP |
 | R14 | M2 | confirms | memcpy-sycl (pipelined): NVIDIA 7–117× CUDA, ANV 6–91× OpenCL, llvmpipe 1.4–14× OpenCL CPU; black-scholes processing time 2.0× (NVIDIA) / 3.7× (ANV); mandelbrot parallel time 4.2× / 18× |
 
-#### IMPR-4: Per-launch uniform descriptor overhead
+#### <a id="impr-4"></a>IMPR-4: Per-launch uniform descriptor overhead
 * **Status:** open (not measured in isolation; nbody args are push constants)
 * **Mechanism:** `vk_kernel_pipeline::set_args` maps/unmaps uniform memory
   per argument and calls `updateDescriptorSets` per launch;
@@ -786,7 +894,7 @@ M2 and are not ranked.
 |-----|---------|---------|-------|
 | code inspection | — | open | need a kernel with >256 B of args to measure |
 
-#### IMPR-5: No FMA contraction (`NoContraction` on all float ops)
+#### <a id="impr-5"></a>IMPR-5: No FMA contraction (`NoContraction` on all float ops)
 * **Status:** confirmed (M1, M2)
 * **Mechanism:** `LLVMToCLSPV.cpp` invokes clspv without `--cl-mad-enable`;
   clspv then decorates every float op with `NoContraction`, ignoring LLVM
@@ -807,8 +915,9 @@ M2 and are not ranked.
 | R8 | M1 | confirms | also FP64: su3 has 12 `v_mul_f64` + 10 `v_add_f64` where HIP has 6 `v_fma_f64` |
 | R13 | M2 | confirms | 64-step `x*a+b` chain: NVIDIA 1637 µs vs CUDA 1132 µs |
 | R16 | M2 | confirms | via `clspv_shim.c`: NVIDIA nbody accel 7.72 → 6.55 ms (CUDA 5.42), mandelbrot kernel 1.15 → 1.04 ms (CUDA 0.71); ANV and llvmpipe unchanged within noise. IGC fuses the same loop into `mad` |
+| R18 | M2 | confirms | no user-level workaround: `-ffast-math` changes nothing, `sycl::mad` is the same `NoContraction` multiply + add, and `sycl::fma` is emulated ([IMPR-16](#impr-16)). 1024-step `x*a+b` chain: NVIDIA 6.83 ms vs CUDA 2.77 ms |
 
-#### IMPR-6: 64-bit index arithmetic (incl. 64-bit integer division)
+#### <a id="impr-6"></a>IMPR-6: 64-bit index arithmetic (incl. 64-bit integer division)
 * **Status:** confirmed (M1, M2)
 * **Mechanism:** clspv invoked with `--arch=spir64`; `get_global_id` and
   indexing are 64-bit, producing `v_lshlrev_b64` + carry chains where HIP
@@ -854,7 +963,7 @@ M2 and are not ranked.
 | R16 | M2 | confirms | ANV nbody inner loop: 64-bit loop counter and per-iteration emulated 64-bit address maths |
 | R14 | M2 | partial | su3: NVIDIA 1.34× CUDA, but ANV at parity with OpenCL (memory-bound there) |
 
-#### IMPR-7: Read-only / no-alias information is dropped
+#### <a id="impr-7"></a>IMPR-7: Read-only / no-alias information is dropped
 * **Status:** open (speculative)
 * **Summary:** `const`/`restrict` kernel pointers could be emitted with
   SPIR-V `NonWritable` / `RestrictPointer`, possibly letting RADV use SMEM
@@ -865,7 +974,7 @@ M2 and are not ranked.
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 
-#### IMPR-8: No VkPipelineCache
+#### <a id="impr-8"></a>IMPR-8: No VkPipelineCache
 * **Status:** open (low priority)
 * **Summary:** Pipelines are created with a null cache each process start;
   the driver's on-disk shader cache currently hides most of the cost.
@@ -874,7 +983,7 @@ M2 and are not ranked.
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 
-#### IMPR-9 (related, not Vulkan): OpenMP backend slow on nbody `nd_range`
+#### <a id="impr-9"></a>IMPR-9 (related, not Vulkan): OpenMP backend slow on nbody `nd_range`
 * **Status:** confirmed (M1, M2)
 * **Summary:** The OpenMP backend takes 117 ms for the nbody accel kernel
   vs 46 ms on llvmpipe. Makes Vulkan look better in llvmpipe vs OpenMP
@@ -887,7 +996,7 @@ M2 and are not ranked.
 | R1, R2 | M1 | confirms | |
 | R9, R14 | M2 | confirms | accel kernel: OpenMP 71.8 ms, llvmpipe 61.9 ms, OpenCL CPU 23.2 ms; HeCBench nbody 81 / 87 / 278 GFLOP/s. OpenMP also costs 41 µs per empty kernel on this hybrid 22-thread CPU |
 
-#### IMPR-10: Atomics ~40% slower on RADV than HIP
+#### <a id="impr-10"></a>IMPR-10: Atomics ~40% slower on RADV than HIP
 * **Status:** confirmed (M1, M2); not root-caused
 * **Summary:** histogram local-memory and global-memory atomic variants are
   1.42–1.44× slower on RADV, while atomicReduction (one global atomic per
@@ -905,7 +1014,7 @@ M2 and are not ranked.
 | R6 | M1 | confirms | smem 429 vs 297 µs; gmem 673 vs 473 µs |
 | R14 | M2 | confirms | histogram first config: NVIDIA smem 134 vs 73 µs (1.84×), gmem 376 vs 338 µs (1.11×); ANV smem 713–1003 vs 647–696 µs (1.1–1.44×), gmem 910–1363 vs 412 µs (2.2–3.3×) vs OpenCL over two passes; atomicReduction at parity on both |
 
-#### IMPR-11: Math builtins lowered to precise multi-instruction sequences
+#### <a id="impr-11"></a>IMPR-11: Math builtins lowered to precise multi-instruction sequences
 * **Status:** open
 * **Mechanism:** `src/libkernel/sscp/clspv/math.cpp` maps
   `__acpp_sscp_rsqrt_f32` to OpenCL `rsqrt`, which clspv implements as
@@ -919,9 +1028,11 @@ M2 and are not ranked.
   difference in precision policy, not only in code quality.
 * **Impact:** nbody accel on NVIDIA 7.6 ms with `sycl::rsqrt` vs 6.5 ms with
   `native::rsqrt` (CUDA 5.4 ms for both); HeCBench nbody uses `sycl::rsqrt`
-  in its inner loop. Any kernel with divisions or `rsqrt` in hot loops.
-* **Proposed fix:** Map `rsqrt` (and probably `divide`) to the native SPIR-V
-  instruction: Vulkan's precision for `InverseSqrt` (2 ULP) matches
+  in its inner loop. Any kernel with `rsqrt` in hot loops; for divisions R18
+  measured no gap against the native backends.
+* **Proposed fix:** Map `rsqrt` to the native SPIR-V instruction (R18
+  found no gap for division, see Evidence): Vulkan's precision for
+  `InverseSqrt` (2 ULP) matches
   OpenCL's `rsqrt`, the difference is denormal/edge handling. Alternatively
   pass `--cl-native-math` / `--cl-fast-relaxed-math` /
   `--cl-denorms-are-zero` to clspv under `-ffast-math`. With
@@ -931,8 +1042,9 @@ M2 and are not ranked.
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 | R16 | M2 | confirms | `rsq.cpp`: NVIDIA rsqrt / native / 1-over-sqrt 7.58 / 6.54 / 7.57 ms (CUDA 5.42 for all); ANV 9.3–10.1 / 7.9–8.5 / 9.1–9.2 ms; llvmpipe 68 / 54–59 / 67 ms. SPIR-V inspection of `mb.cpp` and mandelbrot |
+| R18 | M2 | partial | division is not a gap: a 128-step `a/(x+b)` chain is faster on Vulkan than natively (NVIDIA 4.13 vs CUDA 5.13 ms, ANV 3.49 vs OpenCL 4.01 ms). `native::recip` speeds it up on every GPU backend (Vulkan Ada 2.65, CUDA 4.03, Vulkan MTL 2.33, OpenCL MTL 2.13 ms); `native::divide` is broken on Vulkan ([BUG-15](#bug-15)) |
 
-#### IMPR-12: No runtime loop unrolling or load/store vectorization in the clspv path
+#### <a id="impr-12"></a>IMPR-12: No runtime loop unrolling or load/store vectorization in the clspv path
 * **Status:** open
 * **Mechanism:** AdaptiveCpp's own O3 pipeline is built without a target
   machine for every flavour (`withPassBuilderAndMAM`), but the PTX flavour
@@ -962,8 +1074,9 @@ M2 and are not ranked.
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 | R9, R16 | M2 | confirms | PTX vs SPIR-V of the same kernels; for `single_task`, ANV (1658 µs) and OpenCL (1445 µs) are both slow, so it shows on NVIDIA only |
+| R18 | M2 | confirms | `#pragma unroll 8` on a serial sum (stands in for the proposed fix): NVIDIA 3.15 → 1.14 ms (CUDA 0.91 ms without the pragma), ANV 6.41 → 2.56 ms (OpenCL 4.72 → 1.98 ms), llvmpipe 1.05 → 0.28 ms. The same pragma makes CUDA 2.7× slower (2.43 ms) |
 
-#### IMPR-13: Staging buffers in uncached memory on ANV (D2H at 0.16 GB/s)
+#### <a id="impr-13"></a>IMPR-13: Staging buffers in uncached memory on ANV (D2H at 0.16 GB/s)
 * **Status:** open
 * **Mechanism:** `vk_allocator::staging_allocate` prefers
   `HOST_VISIBLE|HOST_COHERENT|HOST_CACHED` and falls back to
@@ -988,7 +1101,7 @@ M2 and are not ranked.
 | R11 | M2 | confirms | `xfer.cpp` D2H 0.16 GB/s from 16 MB up; `memtype.cpp` read bandwidth per memory type |
 | R14 | M2 | confirms | memcpy-sycl D2H 1 MB 5.3 ms, 2 MB 9.6 ms vs 0.1 ms OpenCL |
 
-#### IMPR-14: Work-group barriers always order global memory
+#### <a id="impr-14"></a>IMPR-14: Work-group barriers always order global memory
 * **Status:** open
 * **Mechanism:** `sscp_barrier()`
   (`include/hipSYCL/sycl/libkernel/detail/device_barrier.hpp`) maps
@@ -1014,7 +1127,7 @@ M2 and are not ranked.
 |-----|---------|---------|-------|
 | R16 | M2 | confirms | `patch_barrier.sh` A/B above; binomial still passes; histogram unaffected |
 
-#### IMPR-15: No reuse of device allocations
+#### <a id="impr-15"></a>IMPR-15: No reuse of device allocations
 * **Status:** open
 * **Mechanism:** Every `malloc_device` is a new `VkDeviceMemory`
   (`vk_allocator::raw_allocate`) and `free` releases it. On ANV the first
@@ -1034,9 +1147,43 @@ M2 and are not ranked.
 |-----|---------|---------|-------|
 | R16 | M2 | confirms | `mandel.cpp` reused vs fresh buffer |
 
+#### <a id="impr-16"></a>IMPR-16: `sycl::fma` is a software routine (40–73× slower than `a*b + c`)
+* **Status:** open
+* **Mechanism:** `__acpp_sscp_fma_f32` (`src/libkernel/sscp/clspv/math.cpp`)
+  calls OpenCL `fma`. clspv lowers it to a correctly rounded software
+  routine for finite inputs (~200 integer instructions; `GLSL.std.450 Fma`
+  only on the NaN/Inf path). It emits a single `OpFmaKHR` (`SPV_KHR_fma`)
+  only if `--spv-khr-fma` lists every float width clspv has enabled, and
+  fp16 and fp64 are enabled by default (`lib/Compiler.cpp`). AdaptiveCpp
+  passes no such option and does not enable `VK_KHR_shader_fma`.
+* **Impact:** Every kernel that calls `sycl::fma` (common in code ported
+  from CUDA's `fmaf`). 1024-step dependent chain: NVIDIA 499 ms vs 6.8 ms
+  for `x*a+b` (CUDA 2.8 ms for both), ANV 351 vs 8.5 ms, llvmpipe 5.3 vs
+  0.53 s. There is no fast user-level alternative today: `sycl::mad` and
+  `a*b+c` are an unfused multiply and add ([IMPR-5](#impr-5)). On devices
+  without `VK_KHR_shader_fma` the routine is unavoidable ([FUND-6](#fund-6)).
+* **Proposed fix:** On devices with `VK_KHR_shader_fma`
+  (`shaderFmaFloat16/32/64`; NVIDIA here, not ANV or llvmpipe with Mesa
+  26.0.8): enable the extension and features at device creation, pass
+  `--spv-khr-fma=<widths>` covering every width clspv has enabled (or
+  disable unused widths), and accept capability `FMAKHR` (6030) in
+  `verify_spv_capabilities`. With `--spv-khr-fma=16,32,64` via
+  `clspv_shim.c` the chain takes 4.49 ms on NVIDIA. Devices without the
+  extension still need the software routine for a correctly rounded `fma`,
+  which SYCL 2020 requires ("Rounding of intermediate products shall not
+  occur"): the Vulkan spec only guarantees `GLSL.std.450 Fma` the precision
+  of "OpFMul followed by OpFAdd", whereas `OpFmaKHR` is "Correctly rounded".
+  A relaxed mode (e.g. under `-ffast-math`) could map it to
+  `GLSL.std.450 Fma` instead.
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R18 | M2 | confirms | `uguide.cpp` chain on all three Vulkan drivers; SPIR-V inspection; `--spv-khr-fma` A/B on NVIDIA |
+
 ### C. Possible bugs
 
-#### BUG-1: Profiling timestamps ignore `timestampPeriod`
+#### <a id="bug-1"></a>BUG-1: Profiling timestamps ignore `timestampPeriod`
 * **Status:** confirmed (M1 RADV, M2 ANV)
 * **Mechanism:** `vk_async_timestamp::get_time_point`
   (`include/hipSYCL/runtime/vk/vk_profiling.hpp`) treats raw query results
@@ -1049,6 +1196,7 @@ M2 and are not ranked.
   exactly 10× (684 µs reported vs ~6.8 ms real). Any profiling-based
   comparison is wrong on such devices. ANV on MTL (period 52.08): ~44×
   (3.3 ms kernel reported as 75 µs).
+* **Report:** [../bug-reports/BUG-1-vk-profiling-timestamp-period.md](../bug-reports/BUG-1-vk-profiling-timestamp-period.md)
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
@@ -1057,7 +1205,7 @@ M2 and are not ranked.
 | R13 | M2 | confirms | ANV wall 3285–3425 µs vs profiled 74.7–78.5 µs |
 | R13 | M2 | n/a | NVIDIA and llvmpipe have period 1; their profiled times are correct |
 
-#### BUG-2: Query pool destroyed while command buffer still executing
+#### <a id="bug-2"></a>BUG-2: Query pool destroyed while command buffer still executing
 * **Status:** confirmed (M1, M2)
 * **Mechanism:** Each profiled op owns a `vk::raii::QueryPool` inside its
   instrumentation object; if the user drops the event before completion,
@@ -1070,6 +1218,7 @@ M2 and are not ranked.
 * **Proposed fix:** Tie query pool lifetime to command buffer completion
   (e.g. keep a reference alongside `_executing_cmd_bufs`), or pool
   query slots per queue.
+* **Report:** [../bug-reports/BUG-2-vk-query-pool-lifetime.md](../bug-reports/BUG-2-vk-query-pool-lifetime.md)
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
@@ -1077,7 +1226,7 @@ M2 and are not ranked.
 | R2 | M1 | confirms | `mb.cpp` initial version with profiling queue |
 | R13 | M2 | confirms | VUID on ANV, NVIDIA and llvmpipe; ANV and NVIDIA survive it, llvmpipe segfaults, aborts or hangs |
 
-#### BUG-3: `ACPP_VISIBILITY_MASK` silently ignores unknown backend names
+#### <a id="bug-3"></a>BUG-3: `ACPP_VISIBILITY_MASK` silently ignores unknown backend names
 * **Status:** disputed (usability issue remains in a different form)
 * **Summary:** `omp;vulkan` is accepted with no warning and the Vulkan
   backend isn't selected as intended. Should warn on unknown keys.
@@ -1087,6 +1236,7 @@ M2 and are not ranked.
   (all backends load), and a device filter that matches no device leaves
   the backend empty without a message. Both make it easy to benchmark the
   wrong device.
+* **Report:** [../bug-reports/BUG-3-visibility-mask-invalid-entries.md](../bug-reports/BUG-3-visibility-mask-invalid-entries.md)
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
@@ -1094,51 +1244,54 @@ M2 and are not ranked.
 | R1 | M1 | confirms | |
 | R13 | M2 | refutes | `omp;vulkan` / `omp;vulkan:llvmpipe` work; see summary for the remaining problems |
 
-#### BUG-4: `find_user_alloc` range check and linear scan
+#### <a id="bug-4"></a>BUG-4: `find_user_alloc` range check and linear scan
 * **Status:** open (minor)
 * **Mechanism:** `vk_allocator::find_user_alloc` uses `ptr > base` (the
   exact-base case is handled earlier so it is harmless) and does an O(n)
   scan for interior pointers on every memcpy/memset. Consider an ordered
   map with `upper_bound`.
+* **Report:** [../bug-reports/BUG-4-vk-find-user-alloc-linear-scan.md](../bug-reports/BUG-4-vk-find-user-alloc-linear-scan.md)
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 | code inspection | — | — | |
 
-#### BUG-5: HeCBench correctness failures (excluded from performance data)
+#### <a id="bug-5"></a>BUG-5: HeCBench correctness failures (excluded from performance data)
 * **Status:** open — each needs triage (benchmark bug vs AdaptiveCpp bug)
 * **Summary:** Benchmarks/devices that produced incorrect results or
   failed to run. No performance data is recorded for them. Rows marked
-  *Vulkan only* are the most likely Vulkan backend bugs.
+  *Vulkan only* are the most likely Vulkan backend bugs. Distinct bugs are
+  split out as BUG-6 to BUG-14, each with an upstream-ready report in
+  [`../bug-reports/`](../bug-reports/).
 
 | Benchmark (args) | Machine/Run | Failing devices | Symptom | Likely culprit |
 |---|---|---|---|---|
-| lavaMD (-boxes1d 10, `-DOUTPUT`) | M1/R7 | RADV, llvmpipe | max rel. error 45 (RADV), 9.9 (llvmpipe) vs OpenMP; HIP agrees to 2e-5 | **Vulkan only** |
-| lud (-s 1024 -v) | M1/R7 | RADV, llvmpipe, OpenMP | mismatches from row 1; HIP passes | Vulkan + OpenMP (generic SSCP?) |
+| lavaMD (-boxes1d 10, `-DOUTPUT`) | M1/R7 | RADV, llvmpipe | max rel. error 45 (RADV), 9.9 (llvmpipe) vs OpenMP; HIP agrees to 2e-5 | **Vulkan only** → [BUG-8](#bug-8) |
+| lud (-s 1024 -v) | M1/R7 | RADV, llvmpipe, OpenMP | mismatches from row 1; HIP passes | Vulkan + OpenMP (generic SSCP?) → [BUG-9](#bug-9) (Vulkan part) |
 | layernorm (8 1024 12288 200) | M1/R6 | RADV | `Mismatch of out`, rc=1; HIP, OpenMP and llvmpipe report no mismatch | **Vulkan (RADV) only** |
-| atomicCost (16 10) | M1/R6 | RADV, llvmpipe | FAIL on 2 of 3 sub-tests (incl. FP64 atomic add) | **Vulkan only** |
-| scan (16777216 100) | M1/R6 | RADV, llvmpipe | `LLVMToCLSPV: clspv invocation failed with exit code -2` (clspv crash), then hang until timeout | **Vulkan only** (clspv) |
+| atomicCost (16 10) | M1/R6 | RADV, llvmpipe | FAIL on 2 of 3 sub-tests (incl. FP64 atomic add) | **Vulkan only** → [BUG-6](#bug-6) (FP64 part) |
+| scan (16777216 100) | M1/R6 | RADV, llvmpipe | `LLVMToCLSPV: clspv invocation failed with exit code -2` (clspv crash), then hang until timeout | **Vulkan only** (clspv) → [BUG-11](#bug-11), [BUG-7](#bug-7) |
 | scan | M1/R6 | OpenMP | segfault | OpenMP |
 | shuffle (200000 100) | M1/R6 | OpenMP (all), llvmpipe (2 of 4) | FAIL | subgroup-size dependent (sg 8 on llvmpipe) |
 | babelstream (default) | M1/R6 | HIP, RADV, OpenMP | dot check FAIL on all but llvmpipe | benchmark |
 | pathfinder (`-DBENCH_PRINT`) | M1/R7 | OpenMP | output differs from HIP/RADV/llvmpipe | OpenMP |
 | miniWeather | M1/R6 | — | not built (requires MPI) | n/a |
-| lavaMD (-boxes1d 10, `-DOUTPUT`) | M2/R15 | ANV, NVIDIA, llvmpipe | max rel. error 42 (ANV), 21 (NVIDIA), 9.9 (llvmpipe, as on M1) vs CUDA; OpenCL GPU/CPU and OpenMP agree to ≤1.3e-5 | **Vulkan only** (all three drivers) |
-| lud (-s 1024 -v) | M2/R15 | ANV, NVIDIA, llvmpipe, OpenMP; CUDA hangs; OpenCL CPU segfaults | Vulkan: ~32k mismatches from (1, 16); OpenMP: 2052 from (1, 0); OpenCL MTL passes | **Vulkan** (all drivers) + OpenMP |
-| layernorm (8 1024 12288 200) | M2/R14 | ANV | `Mismatch of out`, rc=1; NVIDIA, CUDA and OpenCL MTL pass. Passes with the `vk/per-kernel-subgroup-size` backend (`055fe70d`, R15) | **Vulkan (ANV)**: sub-group size |
-| softmax (100000 784 1 100) | M2/R14 | ANV; OpenCL MTL and CPU | ANV: wrong output (`device: 0.000000`); passes with `055fe70d` (12.9 ms). OpenCL: SIGFPE before any output | **Vulkan (ANV)**: sub-group size; OpenCL backend crash |
+| lavaMD (-boxes1d 10, `-DOUTPUT`) | M2/R15 | ANV, NVIDIA, llvmpipe | max rel. error 42 (ANV), 21 (NVIDIA), 9.9 (llvmpipe, as on M1) vs CUDA; OpenCL GPU/CPU and OpenMP agree to ≤1.3e-5 | **Vulkan only** (all three drivers) → [BUG-8](#bug-8) |
+| lud (-s 1024 -v) | M2/R15 | ANV, NVIDIA, llvmpipe, OpenMP; CUDA hangs; OpenCL CPU segfaults | Vulkan: ~32k mismatches from (1, 16); OpenMP: 2052 from (1, 0); OpenCL MTL passes | **Vulkan** (all drivers) + OpenMP → [BUG-9](#bug-9) |
+| layernorm (8 1024 12288 200) | M2/R14 | ANV | `Mismatch of out`, rc=1; NVIDIA, CUDA and OpenCL MTL pass. Passes with the `vk/per-kernel-subgroup-size` backend (`055fe70d`, R15) | **Vulkan (ANV)**: sub-group size → [BUG-10](#bug-10) |
+| softmax (100000 784 1 100) | M2/R14 | ANV; OpenCL MTL and CPU | ANV: wrong output (`device: 0.000000`); passes with `055fe70d` (12.9 ms). OpenCL: SIGFPE before any output | **Vulkan (ANV)**: sub-group size → [BUG-10](#bug-10); OpenCL crash → [BUG-14](#bug-14) |
 | atomicCost (16 10) | M2/R14 | ANV (FP64 sub-test), llvmpipe (LLVM abort in the driver); OpenCL segfaults | needs `AtomicFloat64AddEXT`, which ANV and llvmpipe don't support; NVIDIA passes all 3 | **Vulkan backend**: [BUG-6](#bug-6) |
 | scan (16777216 100) | M2/R14 | ANV, NVIDIA, llvmpipe | clspv `UNREACHABLE executed at lib/BitcastUtils.cpp:1443` ("Unexpected offset for type in GetIdxsForTyFromOffset", `SrcTy = [64 x i32]` / `[32 x i32]`, `DstTy = i8`); every further launch re-runs the failing JIT (~130 clspv crashes in 180 s), so the app looks hung | **Vulkan only** (clspv; retries: [BUG-7](#bug-7)) |
 | scan | M2/R14 | OpenMP | segfault | OpenMP |
 | shuffle (200000 100) | M2/R14 | ANV and OpenCL MTL (the sub-group-32 sub-tests), llvmpipe and OpenCL CPU (16 and 32), OpenMP (all) | identical pattern for both Intel GPU backends; `055fe70d` changes nothing | benchmark assumes sub-group sizes |
 | babelstream (default) | M2/R14 | ANV, NVIDIA, CUDA (dot check); OpenCL segfaults | | benchmark (dot tolerance); OpenCL backend |
-| histogram, atomicCost, babelstream | M2/R14 | OpenCL MTL and CPU | segfault once the runtime is re-initialised in the same process (`extracting function address for clEnqueueMemAdviseINTEL failed`, then `USM device allocation failed (CL:-32)`); histogram's first configuration is valid | OpenCL backend |
+| histogram, atomicCost, babelstream | M2/R14 | OpenCL MTL and CPU | segfault once the runtime is re-initialised in the same process (`extracting function address for clEnqueueMemAdviseINTEL failed`, then `USM device allocation failed (CL:-32)`); histogram's first configuration is valid | OpenCL backend → [BUG-13](#bug-13) |
 | binomial (default) | M2/R14 | llvmpipe | not a failure: >600 s (1000 launches × 4096 barriers, ~0.7 s each); the 20-launch variant passes | n/a (too slow) |
 | nbody (16000 30) | M2/R14 | OpenCL CPU | `FAIL`: energy 172664 vs 172663, the tolerance artefact from R1 | benchmark |
 | pathfinder (`-DBENCH_PRINT`) | M2/R15 | — | all 7 devices bit-identical, including OpenMP | — |
 
-#### BUG-6: Unsupported SPIR-V capabilities are reported but not rejected
+#### <a id="bug-6"></a>BUG-6: Unsupported SPIR-V capabilities are reported but not rejected
 * **Status:** open
 * **Mechanism:** `vk_executable_object::verify_spv_capabilities`
   (`src/runtime/vk/vk_code_object.cpp`) prints
@@ -1154,31 +1307,151 @@ M2 and are not ranked.
   present and treat unknown/unsupported capabilities as a build error; for
   missing float atomics, emulate with a CAS loop in the clspv libkernel (as
   the Metal backend does for 64-bit atomics).
+* **Report:** [../bug-reports/BUG-6-vk-unsupported-spirv-capabilities.md](../bug-reports/BUG-6-vk-unsupported-spirv-capabilities.md)
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 | R14, R15 | M2 | confirms | atomicCost FP64 sub-test; `vulkaninfo`: `shaderBufferFloat64AtomicAdd` false on ANV and llvmpipe, true on NVIDIA |
 
-#### BUG-7: Failed JIT compilations are retried on every launch
+#### <a id="bug-7"></a>BUG-7: Failed JIT compilations are retried on every launch
 * **Status:** open
 * **Mechanism:** When clspv fails, `submit_sscp_kernel_from_code_object`
   returns "Code object construction failed", the node is cancelled and the
   error is registered asynchronously, but nothing records the failure in
-  the kernel cache. Every later launch of the same kernel runs the whole
-  JIT (and clspv) again. Errors only surface through async handlers, so an
-  application that uses `wait()` keeps going.
+  the kernel cache: `kernel_cache::get_or_construct_jit_code_object`
+  (`include/hipSYCL/runtime/kernel_cache.hpp`, shared by all JIT backends)
+  returns `nullptr` without caching anything. Every later launch of the same
+  kernel runs the whole JIT (and clspv) again. Errors only surface through
+  async handlers, so an application that uses `wait()` keeps going.
 * **Impact:** scan-sycl, which M1 reported as "hang until timeout", spends
   its time in ~130 failed clspv runs of ~1.4 s each in 180 s; the same would
   happen for any kernel the Vulkan path can't compile.
 * **Proposed fix:** Cache compilation failures per binary configuration
   and fail fast (or throw synchronously from the submission) on later
   launches.
+* **Report:** [../bug-reports/BUG-7-sscp-failed-jit-retried-every-launch.md](../bug-reports/BUG-7-sscp-failed-jit-retried-every-launch.md)
 * **Evidence:**
 
 | Run | Machine | Verdict | Notes |
 |-----|---------|---------|-------|
 | R14, R15 | M2 | confirms | scan logs: 129–130 failed JIT compilations (`UNREACHABLE` in clspv → `Code object construction failed`) per 180 s run on each Vulkan driver |
+| R17 | M2 | confirms | minimal reproducer: 3 launches, 3 clspv runs of ~1.74 s, kernel never runs |
+
+#### <a id="bug-8"></a>BUG-8: HeCBench lavaMD gives wrong results on every Vulkan driver
+* **Status:** confirmed (M1, M2); not reduced
+* **Summary:** Split out of BUG-5. Max. relative error against a native
+  backend: RADV 45, llvmpipe 9.9 (M1); ANV 42, NVIDIA 21, llvmpipe 9.9 (M2).
+  OpenCL (GPU and CPU), OpenMP, HIP and CUDA agree to ~1e-5.
+* **Report:** [../bug-reports/BUG-8-vk-lavamd-wrong-results.md](../bug-reports/BUG-8-vk-lavamd-wrong-results.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R7 | M1 | confirms | RADV, llvmpipe |
+| R15 | M2 | confirms | ANV, NVIDIA, llvmpipe |
+
+#### <a id="bug-9"></a>BUG-9: HeCBench lud gives wrong results on every Vulkan driver
+* **Status:** confirmed (M1, M2); not reduced
+* **Summary:** Split out of BUG-5. ~32k mismatches with `-s 1024 -v` on ANV,
+  NVIDIA and llvmpipe (M2) and on RADV and llvmpipe (M1); OpenCL on the same
+  Intel GPU and HIP pass. The first mismatch is at (1, 16) on the GPUs and
+  (1, 8) on llvmpipe. OpenMP also fails, with a different pattern.
+* **Report:** [../bug-reports/BUG-9-vk-lud-wrong-results.md](../bug-reports/BUG-9-vk-lud-wrong-results.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R7 | M1 | confirms | RADV, llvmpipe |
+| R15 | M2 | confirms | ANV, NVIDIA, llvmpipe |
+
+#### <a id="bug-10"></a>BUG-10: Intel ANV runs kernels with a different sub-group size than reported
+* **Status:** open; fix on branch `vk/per-kernel-subgroup-size` (`055fe70d`)
+* **Summary:** Split out of BUG-5. The backend reports 32 but ANV compiles
+  SIMD16 unless a size is required; sub-group algorithms and queries break
+  (softmax, layernorm). Not checked whether M1's RADV layernorm failure has
+  the same cause.
+* **Report:** [../bug-reports/BUG-10-vk-anv-subgroup-size.md](../bug-reports/BUG-10-vk-anv-subgroup-size.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R14, R15, R17 | M2 | confirms | softmax/layernorm fail at `f4ff3681`, pass with `055fe70d`; reproducer SIMD16 vs SIMD32 |
+
+#### <a id="bug-11"></a>BUG-11: clspv aborts on unaligned byte GEPs into local memory (scan)
+* **Status:** confirmed (M1, M2); reduced
+* **Summary:** Split out of BUG-5. AdaptiveCpp's dynamic local memory is an
+  `[N x i32]` global; `char` accesses at byte offsets that are not a
+  multiple of 4 make clspv's `SimplifyPointerBitcastPass` hit `UNREACHABLE` in
+  `BitcastUtils::GetIdxsForTyFromOffset`. Reproducers for AdaptiveCpp (SYCL)
+  and clspv (`clspv-opt` on 8 lines of IR) are in the report.
+* **Report:** [../bug-reports/BUG-11-vk-clspv-unaligned-local-gep.md](../bug-reports/BUG-11-vk-clspv-unaligned-local-gep.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R6 | M1 | confirms | scan: clspv exit code -2 on RADV and llvmpipe |
+| R14, R17 | M2 | confirms | all three drivers; reduced and reproduced with `clspv-opt` |
+
+#### <a id="bug-12"></a>BUG-12 (related, not Vulkan): OpenCL accepts `enable_profiling` without profiling support
+* **Status:** open
+* **Summary:** OpenCL devices report `aspect::queue_profiling == false` (the
+  backend has no profiling code), but the queue constructor does not throw
+  `errc::feature_not_supported` as SYCL 2020 requires;
+  `get_profiling_info` aborts later.
+* **Report:** [../bug-reports/BUG-12-ocl-enable-profiling-not-rejected.md](../bug-reports/BUG-12-ocl-enable-profiling-not-rejected.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R13, R17 | M2 | confirms | Intel GPU and CPU OpenCL |
+
+#### <a id="bug-13"></a>BUG-13 (related, not Vulkan): OpenCL USM fails after runtime re-initialisation
+* **Status:** open
+* **Summary:** After the runtime shuts down and restarts in the same process,
+  `clGetExtensionFunctionAddressForPlatform` returns null for all USM entry
+  points and `malloc_device` fails with `CL:-32`. Breaks HeCBench histogram,
+  atomicCost and babelstream on OpenCL after their first configuration.
+* **Report:** [../bug-reports/BUG-13-ocl-usm-after-runtime-reinit.md](../bug-reports/BUG-13-ocl-usm-after-runtime-reinit.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R14, R17 | M2 | confirms | 15-line reproducer; Vulkan unaffected |
+
+#### <a id="bug-14"></a>BUG-14 (related, not Vulkan): OpenCL `sub_group_sizes` heuristic
+* **Status:** open
+* **Summary:** The OpenCL backend reports every power of two up to the
+  work-group size (1…512 on the Intel GPU) instead of the device's sizes
+  (8, 16, 32). HeCBench softmax divides by the largest value and crashes with
+  SIGFPE on both OpenCL devices.
+* **Report:** [../bug-reports/BUG-14-ocl-sub-group-sizes.md](../bug-reports/BUG-14-ocl-sub-group-sizes.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R14, R17 | M2 | confirms | Intel GPU and CPU OpenCL |
+
+#### <a id="bug-15"></a>BUG-15: `sycl::native::divide` makes the kernel fail to load
+* **Status:** open
+* **Summary:** Any kernel that calls `sycl::native::divide` fails on the
+  Vulkan backend with `failed to parse spirv` and `Unknown kernel name`, and
+  the program terminates. clspv receives a one-operand call
+  (`_Z13native_dividef`), exits successfully, and emits an `OpFDiv` whose
+  second operand id is 0 (`spirv-val`: `Id is 0`). The clspv libkernel
+  declares `float native_divide(float)` and calls `native_divide(x)`
+  (`src/libkernel/sscp/clspv/native.cpp`, unchanged on `develop` on
+  2026-10-30). Editing the dumped IR to pass both operands gives a valid
+  module. The other `sycl::native` functions tested work.
+* **Impact:** Kernels that use it do not run on Vulkan. Workaround:
+  `a * sycl::native::recip(b)`, which works and is the faster spelling on
+  every GPU backend in R18.
+* **Report:** [../bug-reports/BUG-15-vk-native-divide.md](../bug-reports/BUG-15-vk-native-divide.md)
+* **Evidence:**
+
+| Run | Machine | Verdict | Notes |
+|-----|---------|---------|-------|
+| R18 | M2 | confirms | ANV, NVIDIA and llvmpipe; OpenCL GPU/CPU, OpenMP and CUDA correct |
 
 ---
 
