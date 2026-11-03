@@ -14,6 +14,7 @@
 #include "hipSYCL/runtime/error.hpp"
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <vulkan/vulkan_raii.hpp>
 
 namespace hipsycl {
@@ -128,7 +129,11 @@ public:
     // (in device ticks) to host time using the calibrated reference pair.
     // Get captured device timestamp from query pool in domain
     // VK_TIME_DOMAIN_DEVICE_KHR
-    const uint64_t device_time = vk_get_query_pool_result(_query_pool);
+    // The result is cached so repeated queries do not hit the driver.
+    std::call_once(_device_time_once, [this] {
+      _device_time = vk_get_query_pool_result(_query_pool);
+    });
+    const uint64_t device_time = _device_time;
 
     const int64_t host_time = vk_device_to_host_time(
         _ref_timestamps.clock_monotonic, _ref_timestamps.device, device_time,
@@ -159,6 +164,8 @@ private:
   const vk::raii::Device &_dev;
   bool _use_khr;
   vk::raii::QueryPool _query_pool;
+  mutable std::once_flag _device_time_once;
+  mutable uint64_t _device_time = 0;
   calibrated_timestamps _ref_timestamps;
   double _ns_per_tick;
   uint32_t _valid_bits;
