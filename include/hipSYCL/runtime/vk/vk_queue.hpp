@@ -130,6 +130,7 @@ private:
 
   // Members for profiling
   std::optional<vk_async_profiling> _profiling;
+  std::shared_ptr<vk_query_pool_allocator> _query_allocator;
   bool _dev_has_khr_calibrated_timestamps;
 
   // Members for command synchronization
