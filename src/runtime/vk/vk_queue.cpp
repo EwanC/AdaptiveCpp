@@ -129,19 +129,33 @@ void vk_queue::profile_if_enabled(operation &op, const dag_node_ptr &node) {
   }
 
   vk_async_profiling async_prof;
-  if (hints.has_hint<rt::hints::request_instrumentation_start_timestamp>()) {
+  const bool needs_start_timestamp =
+      hints.has_hint<rt::hints::request_instrumentation_start_timestamp>();
+  const bool needs_finish_timestamp =
+      hints.has_hint<rt::hints::request_instrumentation_finish_timestamp>();
+  // Snapshot the current host and device timestamps once per operation,
+  // shared by its start and finish timestamps
+  calibrated_timestamps ref_timestamps{};
+  if (needs_start_timestamp || needs_finish_timestamp) {
+    ref_timestamps = vk_get_calibrated_timestamps(
+        _dev_ctx->get_device(), _dev_has_khr_calibrated_timestamps);
+  }
+
+  if (needs_start_timestamp) {
     async_prof.start_time = std::make_shared<vk_execution_start_timestamp>(
-        _dev_ctx->get_device(), *_semaphore,
-        _dev_has_khr_calibrated_timestamps);
+        _dev_ctx->get_device(), *_semaphore, _dev_has_khr_calibrated_timestamps,
+        ref_timestamps, _dev_ctx->get_timestamp_period(),
+        _dev_ctx->get_timestamp_valid_bits());
     op.get_instrumentations()
         .add_instrumentation<instrumentations::execution_start_timestamp>(
             async_prof.start_time);
   }
 
-  if (hints.has_hint<rt::hints::request_instrumentation_finish_timestamp>()) {
+  if (needs_finish_timestamp) {
     async_prof.finish_time = std::make_shared<vk_execution_finish_timestamp>(
-        _dev_ctx->get_device(), *_semaphore,
-        _dev_has_khr_calibrated_timestamps);
+        _dev_ctx->get_device(), *_semaphore, _dev_has_khr_calibrated_timestamps,
+        ref_timestamps, _dev_ctx->get_timestamp_period(),
+        _dev_ctx->get_timestamp_valid_bits());
     op.get_instrumentations()
         .add_instrumentation<instrumentations::execution_finish_timestamp>(
             async_prof.finish_time);
