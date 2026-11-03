@@ -61,6 +61,7 @@ vk_queue::vk_queue(vk_hardware_manager *hw_manager, std::size_t device_index)
       vk_device_extensions::khr_calibrated_timestamps);
 
   _reflection_map = glue::jit::construct_default_reflection_map(_dev_ctx);
+  _query_allocator = std::make_shared<vk_query_pool_allocator>(device);
 
   vk::CommandPoolCreateInfo pool_info{
       vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
@@ -143,9 +144,9 @@ void vk_queue::profile_if_enabled(operation &op, const dag_node_ptr &node) {
 
   if (needs_start_timestamp) {
     async_prof.start_time = std::make_shared<vk_execution_start_timestamp>(
-        _dev_ctx->get_device(), *_semaphore, _dev_has_khr_calibrated_timestamps,
-        ref_timestamps, _dev_ctx->get_timestamp_period(),
-        _dev_ctx->get_timestamp_valid_bits());
+        _dev_ctx->get_device(), *_query_allocator, *_semaphore,
+        _dev_has_khr_calibrated_timestamps, ref_timestamps,
+        _dev_ctx->get_timestamp_period(), _dev_ctx->get_timestamp_valid_bits());
     op.get_instrumentations()
         .add_instrumentation<instrumentations::execution_start_timestamp>(
             async_prof.start_time);
@@ -153,9 +154,9 @@ void vk_queue::profile_if_enabled(operation &op, const dag_node_ptr &node) {
 
   if (needs_finish_timestamp) {
     async_prof.finish_time = std::make_shared<vk_execution_finish_timestamp>(
-        _dev_ctx->get_device(), *_semaphore, _dev_has_khr_calibrated_timestamps,
-        ref_timestamps, _dev_ctx->get_timestamp_period(),
-        _dev_ctx->get_timestamp_valid_bits());
+        _dev_ctx->get_device(), *_query_allocator, *_semaphore,
+        _dev_has_khr_calibrated_timestamps, ref_timestamps,
+        _dev_ctx->get_timestamp_period(), _dev_ctx->get_timestamp_valid_bits());
     op.get_instrumentations()
         .add_instrumentation<instrumentations::execution_finish_timestamp>(
             async_prof.finish_time);
@@ -422,10 +423,11 @@ vk::CommandBuffer vk_queue::begin_command_buffer() {
     // write a query pool timestamp. This gives the device side timestamp
     // for when the command begins execution.
     auto query_pool = _profiling->start_time->get_query_pool();
+    auto query_index = _profiling->start_time->get_query_index();
 
-    cmd_buf.resetQueryPool(query_pool, 0, 1);
+    cmd_buf.resetQueryPool(query_pool, query_index, 1);
     cmd_buf.writeTimestamp(vk::PipelineStageFlagBits::eComputeShader,
-                           query_pool, 0);
+                           query_pool, query_index);
   }
   return cmd_buf;
 }
@@ -436,9 +438,10 @@ void vk_queue::end_command_buffer(vk::CommandBuffer &cmd_buf) {
     // write a query pool timestamp. This gives the device side timestamp
     // for when the command finishes execution.
     auto query_pool = _profiling->finish_time->get_query_pool();
-    cmd_buf.resetQueryPool(query_pool, 0, 1);
+    auto query_index = _profiling->finish_time->get_query_index();
+    cmd_buf.resetQueryPool(query_pool, query_index, 1);
     cmd_buf.writeTimestamp(vk::PipelineStageFlagBits::eComputeShader,
-                           query_pool, 0);
+                           query_pool, query_index);
   }
   cmd_buf.end();
 }

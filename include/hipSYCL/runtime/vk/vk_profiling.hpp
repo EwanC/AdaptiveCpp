@@ -14,7 +14,10 @@
 #include "hipSYCL/runtime/error.hpp"
 #include <cmath>
 #include <cstdint>
+#include <deque>
+#include <memory>
 #include <mutex>
+#include <vector>
 #include <vulkan/vulkan_raii.hpp>
 
 namespace hipsycl {
@@ -31,12 +34,64 @@ struct calibrated_timestamps {
 calibrated_timestamps vk_get_calibrated_timestamps(const vk::raii::Device &,
                                                    bool);
 
-// Helper function for calling vkGetQueryPoolResults on a single element
-// query pool
-uint64_t vk_get_query_pool_result(const vk::raii::QueryPool &);
+// Helper function for calling vkGetQueryPoolResults on a single query
+uint64_t vk_get_query_pool_result(const vk::raii::QueryPool &,
+                                  uint32_t query_index);
 
-// Helper function for creating a single element query pool
-vk::raii::QueryPool vk_create_query_pool(const vk::raii::Device &);
+// Helper function for creating a timestamp query pool
+vk::raii::QueryPool vk_create_query_pool(const vk::raii::Device &,
+                                         uint32_t query_count);
+
+class vk_query_pool_allocator;
+
+// A single timestamp query handed out by vk_query_pool_allocator. The query
+// is returned to the allocator when this object is destroyed, so it must be
+// kept alive until both the command-buffer writing it has completed and
+// nobody needs to read the result anymore.
+class vk_query_slot {
+public:
+  vk_query_slot(std::shared_ptr<vk_query_pool_allocator> allocator,
+                const vk::raii::QueryPool *pool, uint32_t index)
+      : _allocator{std::move(allocator)}, _pool{pool}, _index{index} {}
+  ~vk_query_slot();
+
+  vk_query_slot(const vk_query_slot &) = delete;
+  vk_query_slot &operator=(const vk_query_slot &) = delete;
+
+  vk::QueryPool get_pool() const { return **_pool; }
+  uint32_t get_index() const { return _index; }
+  uint64_t get_result() const {
+    return vk_get_query_pool_result(*_pool, _index);
+  }
+
+private:
+  std::shared_ptr<vk_query_pool_allocator> _allocator;
+  const vk::raii::QueryPool *_pool;
+  uint32_t _index;
+};
+
+// Hands out timestamp queries from a growing set of query pools, so that
+// profiled operations do not each need to create their own query pool.
+// Thread-safe; queries may be released from any thread.
+class vk_query_pool_allocator
+    : public std::enable_shared_from_this<vk_query_pool_allocator> {
+public:
+  explicit vk_query_pool_allocator(const vk::raii::Device &dev) : _dev{dev} {}
+
+  std::unique_ptr<vk_query_slot> allocate();
+
+private:
+  friend class vk_query_slot;
+  void release(const vk::raii::QueryPool *pool, uint32_t index);
+
+  static constexpr uint32_t queries_per_pool = 256;
+
+  const vk::raii::Device &_dev;
+  std::mutex _mutex;
+  // deque keeps references to existing pools stable when growing
+  std::deque<vk::raii::QueryPool> _pools;
+  std::vector<std::pair<const vk::raii::QueryPool *, uint32_t>> _free;
+};
 
 // Converts a device timestamp (in device ticks, as returned by
 // vkGetQueryPoolResults) to host CLOCK_MONOTONIC nanoseconds, using a
@@ -93,21 +148,21 @@ public:
   // `ref_timestamps` is a calibrated (host, device) timestamp pair. Start and
   // finish timestamps of the same operation should share the same pair, so
   // that calibration jitter cannot make the measured duration negative.
-  vk_async_timestamp(const vk::raii::Device &dev, vk::Semaphore sem,
-                     bool use_khr, calibrated_timestamps ref_timestamps,
-                     double ns_per_tick, uint32_t valid_bits)
-      : _dev(dev), _use_khr(use_khr), _query_pool(nullptr),
-        _ref_timestamps(ref_timestamps), _ns_per_tick(ns_per_tick),
-        _valid_bits(valid_bits), _sem(sem), _sem_wait_val(0),
-        _host_timestamp(0) {
-
-    // Create a single element query pool owned by this instrumentation object
-    _query_pool = vk_create_query_pool(_dev);
+  vk_async_timestamp(const vk::raii::Device &dev,
+                     vk_query_pool_allocator &query_allocator,
+                     vk::Semaphore sem, bool use_khr,
+                     calibrated_timestamps ref_timestamps, double ns_per_tick,
+                     uint32_t valid_bits)
+      : _dev(dev), _use_khr(use_khr), _ref_timestamps(ref_timestamps),
+        _ns_per_tick(ns_per_tick), _valid_bits(valid_bits), _sem(sem),
+        _sem_wait_val(0), _host_timestamp(0) {
+    // Query owned by this instrumentation object
+    _query = query_allocator.allocate();
   }
 
-  // Getter allows vkQueue to append command-buffer commands using this
-  // query-pool
-  vk::QueryPool get_query_pool() { return *_query_pool; }
+  // Getters allow vkQueue to append command-buffer commands using this query
+  vk::QueryPool get_query_pool() { return _query->get_pool(); }
+  uint32_t get_query_index() const { return _query->get_index(); }
 
   // Set the value of the timeline semaphore to wait on for command completion
   void set_semaphore_wait_val(uint64_t wait_val) { _sem_wait_val = wait_val; }
@@ -130,9 +185,8 @@ public:
     // Get captured device timestamp from query pool in domain
     // VK_TIME_DOMAIN_DEVICE_KHR
     // The result is cached so repeated queries do not hit the driver.
-    std::call_once(_device_time_once, [this] {
-      _device_time = vk_get_query_pool_result(_query_pool);
-    });
+    std::call_once(_device_time_once,
+                   [this] { _device_time = _query->get_result(); });
     const uint64_t device_time = _device_time;
 
     const int64_t host_time = vk_device_to_host_time(
@@ -163,7 +217,7 @@ private:
   // Members below used for device execution
   const vk::raii::Device &_dev;
   bool _use_khr;
-  vk::raii::QueryPool _query_pool;
+  std::unique_ptr<vk_query_slot> _query;
   mutable std::once_flag _device_time_once;
   mutable uint64_t _device_time = 0;
   calibrated_timestamps _ref_timestamps;

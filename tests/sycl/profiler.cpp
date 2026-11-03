@@ -288,6 +288,54 @@ BOOST_AUTO_TEST_CASE(queue_profiling_duration_vs_wall_clock)
   }
 }
 
+// Timestamps of events kept alive across many later submissions must not be
+// overwritten by later operations, e.g. through reuse of backend query slots.
+BOOST_AUTO_TEST_CASE(queue_profiling_many_live_events)
+{
+  if(default_device_supports_profiling()) {
+    sycl::queue queue{sycl::property_list{
+        sycl::property::queue::in_order{},
+        sycl::property::queue::enable_profiling{}}};
+    constexpr size_t n = 1024;
+    constexpr int num_events = 700;
+    int *data = sycl::malloc_device<int>(n, queue);
+    queue.memset(data, 0, n * sizeof(int)).wait();
+
+    std::vector<sycl::event> events;
+    for (int i = 0; i < num_events; ++i)
+      events.push_back(queue.parallel_for<class profile_many_live_events>(
+          sycl::range<1>{n}, [=](sycl::id<1> idx) { data[idx] += 1; }));
+    queue.wait();
+
+    // Interleave further submissions whose events are dropped
+    for (int i = 0; i < num_events; ++i)
+      queue.parallel_for<class profile_many_live_events_dropped>(
+          sycl::range<1>{n}, [=](sycl::id<1> idx) { data[idx] += 1; });
+    queue.wait();
+
+    std::vector<uint64_t> start(num_events), end(num_events);
+    for (int i = 0; i < num_events; ++i) {
+      start[i] = events[i].get_profiling_info<
+          sycl::info::event_profiling::command_start>();
+      end[i] = events[i].get_profiling_info<
+          sycl::info::event_profiling::command_end>();
+    }
+    // Timestamps of different operations may be converted with different
+    // host/device calibrations, so allow some jitter between consecutive
+    // operations. Reused query slots would be off by far more than that.
+    constexpr uint64_t tolerance_ns = 1'000'000;
+    int ordering_violations = 0;
+    for (int i = 0; i < num_events; ++i) {
+      if (start[i] > end[i])
+        ++ordering_violations;
+      if (i + 1 < num_events && end[i] > start[i + 1] + tolerance_ns)
+        ++ordering_violations;
+    }
+    BOOST_CHECK_EQUAL(ordering_violations, 0);
+    sycl::free(data, queue);
+  }
+}
+
 // Profiled operations whose events are dropped immediately must not release
 // backend profiling resources while the device is still using them.
 BOOST_AUTO_TEST_CASE(queue_profiling_dropped_events)

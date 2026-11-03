@@ -372,17 +372,21 @@ extensions to align device and host side counters.
 `vkGetCalibratedTimestampsKHR` is used to get the host timestamp for when a command is submitted, and also
 command start and/or end timestamps for when a command is executed asynchronously on host using a worker thread.
 
-For the most common case where commands are executed asynchronously on device in a vkCommandBuffer,
-a single element `vkQueryPool` is created for each instrumentation counter. The command-buffer then
-has extra commands included to bookend it's execution that record the device side timestamps
-into the query pool. When instrumentation counter is queried it reports back the device side
-timestamp converted to a host side timepoint using the calibrated timestamp reference.
+For commands executed on device, the command-buffer is bookended with `vkCmdWriteTimestamp`
+commands. Each instrumentation counter owns a single query, handed out by a per-queue allocator
+that grows in pools of 256 queries. A query is returned to the allocator only once the
+command-buffer writing it has completed *and* the counter is destroyed, which requires both the
+rt DAG node and any user-facing `sycl::event` to be released. Queries are therefore never
+reused while a result can still be read. Freed queries return to a free list via a
+reference-counted handle that also keeps the allocator alive, so events may outlive their
+queue. The queue keeps the counters of in-flight
+command-buffers alive, so events may be dropped before the command completes.
 
-A single large query pool that is shared by all event instrumentation counters is
-not used because the choice of static query pool size would have been arbitrary.
-Additionally, the runtime wouldn't frequently free the timestamps to return to the pool,
-as the rt DAG nodes which owns the lifetime of the counters needs to outlive the user
-facing `sycl::event` object.
+Device timestamps are in ticks. They are converted to host time from a calibrated (host, device)
+reference pair, scaled by `VkPhysicalDeviceLimits::timestampPeriod` and masked to
+`VkQueueFamilyProperties::timestampValidBits`. One reference pair is taken per command and shared by
+its start and end counters, so calibration jitter does not affect the measured duration. Each
+result is read from the query once and cached.
 
 ### Compiler
 
