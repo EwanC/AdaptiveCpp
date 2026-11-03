@@ -238,5 +238,28 @@ BOOST_AUTO_TEST_CASE(queue_profiling_update_host_supported)
   }
 }
 
+// Profiled operations whose events are dropped immediately must not release
+// backend profiling resources while the device is still using them.
+BOOST_AUTO_TEST_CASE(queue_profiling_dropped_events)
+{
+  if(default_device_supports_profiling()) {
+    sycl::queue queue{sycl::property_list{
+        sycl::property::queue::in_order{},
+        sycl::property::queue::enable_profiling{}}};
+    constexpr size_t n = 1 << 16;
+    int *data = sycl::malloc_device<int>(n, queue);
+    queue.memset(data, 0, n * sizeof(int));
+    for (int i = 0; i < 500; ++i)
+      queue.parallel_for<class profile_dropped_events>(
+          sycl::range<1>{n}, [=](sycl::id<1> idx) { data[idx] += 1; });
+    queue.wait();
+
+    int result = 0;
+    queue.memcpy(&result, data + n - 1, sizeof(int)).wait();
+    BOOST_CHECK_EQUAL(result, 500);
+    sycl::free(data, queue);
+  }
+}
+
 
 BOOST_AUTO_TEST_SUITE_END() // NOTE: Make sure not to add anything below this line
