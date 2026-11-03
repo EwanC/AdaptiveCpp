@@ -148,6 +148,8 @@ vk_hardware_context::vk_hardware_context(
   _queue = vk::raii::Queue(_device, _queue_index, 0);
 
   _limits = phys_device.getProperties().limits;
+  _timestamp_valid_bits =
+      phys_device.getQueueFamilyProperties()[_queue_index].timestampValidBits;
 
   /* Vulkan hpp headers don't seem to like instantiating
    * a pointer chain wrapper with `vkGetPhysicalDeviceSubgroupProperties`
